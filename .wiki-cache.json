@@ -1,0 +1,240 @@
+{
+  "version": 1,
+  "entries": {
+    "raw/articles/2026-04-27-gtsam-4.3a1-docs.md": {
+      "hash": "sha256:631c9b2b5d07ec136f7f2d701f094cc8d9476d2a3c0dc68eb1b428c37cfc9888",
+      "ingested_at": "2026-04-27T04:08:12Z",
+      "source_page": "wiki/sources/2026-04-27-gtsam-4.3a1-docs.md"
+    },
+    "raw/docs-deep-dive/kiss_icp_analysis.md": {
+      "hash": "sha256:3aa8cb52257f597590a80f212553b6c46cb37fda4019cb551005c6d2b75205bf",
+      "ingested_at": "2026-04-29T05:46:10Z",
+      "source_page": "wiki/sources/2026-04-29-kiss_icp_analysis.md"
+    },
+    "raw/docs-deep-dive/cartographer_analysis.md": {
+      "hash": "sha256:70785af64a2c2af624c6c5a974025c7f41c47dfb4810e3c088ab90bafc07f567",
+      "ingested_at": "2026-04-29T05:46:11Z",
+      "source_page": "wiki/sources/2026-04-29-cartographer_analysis.md"
+    },
+    "raw/docs-deep-dive/lightning_lm_analysis.md": {
+      "hash": "sha256:0d8543f73132bbdfebe03b8299836dd7e2869fb2edb5b10fa23937a1e3fbc1e3",
+      "ingested_at": "2026-04-29T05:46:14Z",
+      "source_page": "wiki/sources/2026-04-29-lightning_lm_analysis.md"
+    },
+    "raw/docs-deep-dive/r3live_analysis.md": {
+      "hash": "sha256:d948e7b89b640cd275fb6fbb4254958ddcad198a3d2b3c981dfcb8428ccf61d9",
+      "ingested_at": "2026-04-29T05:46:16Z",
+      "source_page": "wiki/sources/2026-04-29-r3live_analysis.md"
+    },
+    "raw/docs-deep-dive/fast_livo2_analysis.md": {
+      "hash": "sha256:c51fc5de6fafd34924bbdc87b1fc2a2bc41934c5ff059602fa29b684a70cf73c",
+      "ingested_at": "2026-04-29T05:46:17Z",
+      "source_page": "wiki/sources/2026-04-29-fast_livo2_analysis.md"
+    },
+    "raw/docs-deep-dive/lvi_sam_analysis.md": {
+      "hash": "sha256:4480c722b58ad4534101536ae10c44d98650b67b79d545e3a612b2ff3a5b1aaf",
+      "ingested_at": "2026-04-29T05:46:19Z",
+      "source_page": "wiki/sources/2026-04-29-lvi_sam_analysis.md"
+    },
+    "raw/docs-deep-dive/pin_slam_analysis.md": {
+      "hash": "sha256:d83a4f4f864b5fa46b40e241a9258ccaebb2df80b727999b06378c774ed0e3b8",
+      "ingested_at": "2026-04-29T05:46:21Z",
+      "source_page": "wiki/sources/2026-04-29-pin_slam_analysis.md"
+    },
+    "raw/docs-deep-dive/bev_lslam_analysis.md": {
+      "hash": "sha256:b8bbcd30e2d2bcf2c4485d57eb6adba559598cc2c8cfbb82afd00fb536c1e0ea",
+      "ingested_at": "2026-04-29T05:46:22Z",
+      "source_page": "wiki/sources/2026-04-29-bev_lslam_analysis.md"
+    },
+    "raw/docs-deep-dive/genz_icp_analysis.md": {
+      "hash": "sha256:7004a4268b400ce3c3b5a6efb306eb2e7d8fe36d6c1b7ec14f972ad4a9b1e498",
+      "ingested_at": "2026-04-29T05:46:24Z",
+      "source_page": "wiki/sources/2026-04-29-genz_icp_analysis.md"
+    },
+    "raw/docs-deep-dive/kimera_vio_analysis.md": {
+      "hash": "sha256:c0b59d88aeb934bb7ab1328a8a6b58ce15a493d3c21029e31c7d5b346b28d919",
+      "ingested_at": "2026-04-29T05:47:20Z",
+      "source_page": "wiki/sources/2026-04-29-kimera_vio-analysis.md"
+    },
+    "raw/docs-deep-dive/droid_slam_analysis.md": {
+      "hash": "sha256:99812d84c38a29104d5cf8af4ed60dedb5bf725697705a772d6a27bd443c1799",
+      "ingested_at": "2026-04-29T05:47:20Z",
+      "source_page": "wiki/sources/2026-04-29-droid_slam-analysis.md"
+    },
+    "raw/docs-deep-dive/nice_slam_analysis.md": {
+      "hash": "sha256:4beb6a766c57ce61385026b753194e65bc449fd1d953f5f013cd230b0827e079",
+      "ingested_at": "2026-04-29T05:47:20Z",
+      "source_page": "wiki/sources/2026-04-29-nice_slam-analysis.md"
+    },
+    "raw/docs-deep-dive/monogs_analysis.md": {
+      "hash": "sha256:b9a2f79edcbf9ef6a2e60309e8248afe291cceab5632c099a6552c735ff5d112",
+      "ingested_at": "2026-04-29T05:47:20Z",
+      "source_page": "wiki/sources/2026-04-29-monogs-analysis.md"
+    },
+    "raw/docs-deep-dive/fast_lio_sam_analysis.md": {
+      "hash": "sha256:ef28430ca758a175f5dc7f7edca078c7ec8d75a1baf25e619501a18a3562d018",
+      "ingested_at": "2026-04-29T05:47:38Z",
+      "source_page": "wiki/sources/2026-04-29-fast_lio_sam-analysis.md"
+    },
+    "raw/docs-deep-dive/lio_sam_analysis.md": {
+      "hash": "sha256:b7ed0a9010e88a924c3b0ffa8e019152e7ef619305fcd1b482391dd88ceec894",
+      "ingested_at": "2026-04-29T05:47:38Z",
+      "source_page": "wiki/sources/2026-04-29-lio_sam-analysis.md"
+    },
+    "raw/docs-deep-dive/lego_loam_analysis.md": {
+      "hash": "sha256:52f0450dc2c81055ff67aeb4ea1468ebca800411e388f38232c94bad7ebf01b7",
+      "ingested_at": "2026-04-29T05:47:38Z",
+      "source_page": "wiki/sources/2026-04-29-lego_loam-analysis.md"
+    },
+    "raw/docs-deep-dive/fusions_slam_analysis.md": {
+      "hash": "sha256:2d4bed3f7348f699763137f103fd4fe6949c13a1d37173bf99dcfef66f6dc4e9",
+      "ingested_at": "2026-04-29T05:47:38Z",
+      "source_page": "wiki/sources/2026-04-29-fusions_slam-analysis.md"
+    },
+    "raw/docs-deep-dive/ct_icp_analysis.md": {
+      "hash": "sha256:cb693cb0f5db5482a86da9e7c76e51020e689ace109cd15aa31bf673f058275f",
+      "ingested_at": "2026-04-29T05:47:39Z",
+      "source_page": "wiki/sources/2026-04-29-ct_icp-analysis.md"
+    },
+    "raw/docs-top/framework_comparison.md": {
+      "hash": "sha256:ce27f521e1aab527f34750bff6d910bbb754103e1da2ff409ca592efbea1f70e",
+      "ingested_at": "2026-04-29T05:49:05Z",
+      "source_page": "wiki/sources/2026-04-29-framework-comparison.md"
+    },
+    "raw/docs-top/paper_notes.md": {
+      "hash": "sha256:f635d7be858b0346912d9b8fc4a8a801c69e87471f16e059b11e76793bbba4da",
+      "ingested_at": "2026-04-29T05:49:16Z",
+      "source_page": "wiki/sources/2026-04-29-paper-notes.md"
+    },
+    "raw/docs-comparison/camera_pipeline_comparison.md": {
+      "hash": "sha256:c62737b7784856d8937dce3a6066bd739b365e99015b5c2a0973c7377577a122",
+      "ingested_at": "2026-04-29T05:49:37Z",
+      "source_page": "wiki/sources/2026-04-29-camera-pipeline-comparison.md"
+    },
+    "raw/docs-comparison/imu_pipeline_comparison.md": {
+      "hash": "sha256:926a3ad63b8b81129839865c35aeeb9e46325dc90ed4dc49ae23f5422c89399e",
+      "ingested_at": "2026-04-29T05:50:33Z",
+      "source_page": "wiki/sources/2026-04-29-imu-pipeline-comparison.md"
+    },
+    "raw/docs-comparison/lidar_pipeline_comparison.md": {
+      "hash": "sha256:7ea1af37509c7e066de0fb12b9bb7de4ef18e964d0940ebcd46525d99e0c3702",
+      "ingested_at": "2026-04-29T05:50:34Z",
+      "source_page": "wiki/sources/2026-04-29-lidar-pipeline-comparison.md"
+    },
+    "raw/docs-comparison/gnss_pipeline_comparison.md": {
+      "hash": "sha256:2cab80cd419d3a8b8bf6667c893763298ab33aaf8c346b60da8f7190aeabd2ef",
+      "ingested_at": "2026-04-29T05:50:35Z",
+      "source_page": "wiki/sources/2026-04-29-gnss-pipeline-comparison.md"
+    },
+    "raw/docs-comparison/special_sensors_comparison.md": {
+      "hash": "sha256:0bdf259f2f55466dc0a5c69fe6b0cb8fef0b6321ce1cbc960a93b6b630a39939",
+      "ingested_at": "2026-04-29T05:50:36Z",
+      "source_page": "wiki/sources/2026-04-29-special-sensors-comparison.md"
+    },
+    "raw/docs-deep-dive/open_vins_analysis.md": {
+      "hash": "sha256:5e094e2df53c3b4254051a6cc68e55763275ee3e71f1d9e2beb12278e667aea8",
+      "ingested_at": "2026-04-29T05:51:05Z",
+      "source_page": "wiki/sources/2026-04-29-open-vins-analysis.md"
+    },
+    "raw/docs-deep-dive/orb_slam3_analysis.md": {
+      "hash": "sha256:d519a9e37ca00240da078b09ba4b4ff69946d5dadad58ada1e58806aad036bb5",
+      "ingested_at": "2026-04-29T05:51:06Z",
+      "source_page": "wiki/sources/2026-04-29-orb-slam3-analysis.md"
+    },
+    "raw/docs-deep-dive/gtsam_points_analysis.md": {
+      "hash": "sha256:1eef6c6ed9383f05ac0d6f52f9a56d6212ad44843164ac1f7da3532b34941796",
+      "ingested_at": "2026-04-29T05:52:09Z",
+      "source_page": "wiki/sources/2026-04-28-gtsam_points-analysis.md"
+    },
+    "raw/docs-deep-dive/ic_gvins_analysis.md": {
+      "hash": "sha256:9ee834e52761a890c99b80b2152f2460b92ec3a1f03e653d817e04f3c9045d94",
+      "ingested_at": "2026-04-29T05:52:09Z",
+      "source_page": "wiki/sources/2026-04-28-ic_gvins-analysis.md"
+    },
+    "raw/docs-deep-dive/ob_gins_analysis.md": {
+      "hash": "sha256:a35f0cc393cc501a1defa89e55f634c746a3dd1dd7b24506a41006f3a6135e00",
+      "ingested_at": "2026-04-29T05:52:09Z",
+      "source_page": "wiki/sources/2026-04-28-ob_gins-analysis.md"
+    },
+    "raw/docs-deep-dive/superodom_analysis.md": {
+      "hash": "sha256:3e3f26885df969d8e7ec17b7c867118359889e627bb2e92cc670d231d13b38f5",
+      "ingested_at": "2026-04-29T05:52:09Z",
+      "source_page": "wiki/sources/2026-04-28-superodom-analysis.md"
+    },
+    "raw/docs-deep-dive/lt_mapper_analysis.md": {
+      "hash": "sha256:01c70c5f57cd57df409cfbc952f049eea68b2d61d3a18d6c66bdb4121b948f11",
+      "ingested_at": "2026-04-29T05:52:12Z",
+      "source_page": "wiki/sources/2026-04-28-lt-mapper-analysis.md"
+    },
+    "raw/docs-deep-dive/4d_radar_slam_analysis.md": {
+      "hash": "sha256:78bd6e79c9bd8daf698cf545d7f2aef901debf0150b0bbcb62511959eebb4404",
+      "ingested_at": "2026-04-29T05:52:12Z",
+      "source_page": "wiki/sources/2026-04-28-4d-radar-slam-analysis.md"
+    },
+    "raw/docs-deep-dive/rolo_analysis.md": {
+      "hash": "sha256:0377240dcf4f0a9f0b502bde88a2585c445e2c9c7d5821fe6b1b8c0a78e87321",
+      "ingested_at": "2026-04-29T05:52:13Z",
+      "source_page": "wiki/sources/2026-04-28-rolo-analysis.md"
+    },
+    "raw/docs-deep-dive/slam_fusion_core_analysis.md": {
+      "hash": "sha256:213c67c8baf2427fb08ffb2727aa8743248662714ef8290707a18f3aa7a07da0",
+      "ingested_at": "2026-04-29T05:52:13Z",
+      "source_page": "wiki/sources/2026-04-28-slam_fusion_core-analysis.md"
+    },
+    "raw/docs-deep-dive/vins_fusion_analysis.md": {
+      "hash": "sha256:cf7b2aeff9c9371af75fa85d83e5a49d86d126c3d83cb483d8c963a1a96da566",
+      "ingested_at": "2026-04-29T05:58:31Z",
+      "source_page": "wiki/sources/2026-04-29-vins-fusion-analysis-analysis.md"
+    },
+    "raw/docs-deep-dive/msckf_vio_analysis.md": {
+      "hash": "sha256:5b22e218e034e4cd0863be9e2d2dbc1f4aed2f7735e7258670531437ddb65c04",
+      "ingested_at": "2026-04-29T05:58:31Z",
+      "source_page": "wiki/sources/2026-04-29-msckf-vio-analysis-analysis.md"
+    },
+    "raw/docs-deep-dive/schurvins_analysis.md": {
+      "hash": "sha256:bf2bff43d8d1f70f406ae782ce4be03cb1b6f73e52039178bc22379dbdb4d0aa",
+      "ingested_at": "2026-04-29T05:58:31Z",
+      "source_page": "wiki/sources/2026-04-29-schurvins-analysis-analysis.md"
+    },
+    "raw/docs-deep-dive/openmavis_analysis.md": {
+      "hash": "sha256:2acf258473d8f714800beddbb7887cd3003542280e4703836a6ef831cde8075e",
+      "ingested_at": "2026-04-29T05:58:31Z",
+      "source_page": "wiki/sources/2026-04-29-openmavis-analysis-analysis.md"
+    },
+    "raw/docs-deep-dive/dm_vio_analysis.md": {
+      "hash": "sha256:f3ea9cecfec72b7abb0b7050a59b8218a3c345a058d28dea7375e10413690792",
+      "ingested_at": "2026-04-29T05:58:31Z",
+      "source_page": "wiki/sources/2026-04-29-dm-vio-analysis-analysis.md"
+    },
+    "raw/docs-deep-dive/dso_analysis.md": {
+      "hash": "sha256:479d8aeaabf46a1dbf66797869b5a41fd7bb3d532a50c54b52ef9bb676b8a735",
+      "ingested_at": "2026-04-29T05:58:31Z",
+      "source_page": "wiki/sources/2026-04-29-dso-analysis-analysis.md"
+    },
+    "raw/docs-deep-dive/svo_pro_analysis.md": {
+      "hash": "sha256:54611b23d7750146a5b1d7c0a3c7f8f9e5871ff2115d3ef6aaf99277f7f6494f",
+      "ingested_at": "2026-04-29T05:58:32Z",
+      "source_page": "wiki/sources/2026-04-29-svo-pro-analysis-analysis.md"
+    },
+    "raw/docs-deep-dive/rovio_analysis.md": {
+      "hash": "sha256:7c746f41b6c07491a38041053c3df289441acb62ca81e555d42b3766738c2808",
+      "ingested_at": "2026-04-29T05:58:32Z",
+      "source_page": "wiki/sources/2026-04-29-rovio-analysis-analysis.md"
+    },
+    "raw/docs-deep-dive/esvo_analysis.md": {
+      "hash": "sha256:4da7f8ed0fef6105aa3ac1a527b009bfad7f67143d54d9fbd1b6f687d601cc2e",
+      "ingested_at": "2026-04-29T05:58:32Z",
+      "source_page": "wiki/sources/2026-04-29-esvo-analysis-analysis.md"
+    },
+    "raw/articles/2026-04-29-px4-imu-preprocessing.md": {
+      "hash": "sha256:02e59322cda25a5358f713ed45d0a12b85d587b24886acb36021363fece3a2ac",
+      "ingested_at": "2026-04-29T06:16:59Z",
+      "source_page": "wiki/sources/2026-04-29-px4-imu-preprocessing.md"
+    },
+    "raw/notes/2026-04-30-image-preprocessing-comparison.md": {
+      "hash": "sha256:5a90e4f75dcb73663beee027d0df75b03c963f9d07d83457ea25174c0fd72395",
+      "ingested_at": "2026-04-30T06:07:47Z",
+      "source_page": "wiki/sources/2026-04-30-image-preprocessing-comparison.md"
+    }
+  }
+}
