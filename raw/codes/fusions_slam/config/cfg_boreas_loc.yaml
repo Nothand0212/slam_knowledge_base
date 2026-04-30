@@ -1,0 +1,49 @@
+wrapper:
+  save_pose: true
+  lidar_line_num: 128 # 表示lidar线数目为128线
+  point_gap_num: -1 # -1 表示不跳点, 5表示隔5点取一个点
+  lidar_topic: "/velodyne/points"
+  imu_topic: "/imu_raw_trans"
+  rtk_topic: "/gps_odom_post"
+  lidar_xy_box: [-2.0, 2.0, -2.0, 2.0] # xmin xmax ymin ymax
+  use_rtk: true
+  lidar_type: 1 # 1 velodyne 2 ouster
+  rtk_date_type :  3 # 1 novatel_msgs/INSPVAX  2 sensor_msgs/NavSatFix 3 nav_msgs/Odometry
+  T_imu_lidar: [  0.736055565, -0.67692112, 0, 0, 
+                  0.6769211217, 0.7360555651, 0, 0, 
+                  0, 0, 1, 0.13,
+                  0, 0, 0, 1]
+  T_imu_ant: [  1, 0, 0, 0, 
+                  0, 1, 0, 0, 
+                  0, 0, 1, 0,
+                  0, 0, 0, 1]
+location:
+  leaf_size: 0.5
+  imu_init_duration: 0.1
+
+front:
+  leaf_size: 0.5
+  imu_init_duration: 4.0
+
+map:
+  map_resolution: 0.2
+  local_map_length: 1000.0
+  save_map: true
+  save_path: "data/map_boreas.pcd"
+  map_leaf_size: 0.8
+
+map_engine:
+  map_path: "data/map_boreas.pcd"
+  
+propagate:
+  rtk_type: 0 
+  rtk_trans_noise: [0.001, 0.001, 0.001]
+  rtk_rpy_noise: [0.0001, 0.0001, 0.0001]
+
+ieskf:
+  update_ba_bg: false
+  cov_gyroscope: 0.1
+  cov_acceleration: 0.1
+  cov_bias_acceleration: 0.0001
+  cov_bias_gyroscope: 0.0001
+  imu_hz: 200

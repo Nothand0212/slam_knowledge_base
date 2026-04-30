@@ -1,0 +1,133 @@
+# fusion_slam
+This is a new  project : fusion_slam
+
+————————————
+工程地址:https://github.com/LiangHongY/fusions_slam
+demo数据链接: https://pan.baidu.com/s/1h25nNlkFkCZnwisw1xxHxQ 提取码: kk32
+csdn博客:https://blog.csdn.net/qq_45701501/article/details/152357690
+编译运行全流程视频:https://www.bilibili.com/video/BV1LdJ9zVEHm/?spm_id_from=333.1387.homepage.video_card.click&vd_source=787d0803d75397d1e11465021a135b57
+
+后端运行视频:https://www.bilibili.com/video/BV1avidBeE8e/?spm_id_from=333.1387.homepage.video_card.click&vd_source=787d0803d75397d1e11465021a135b57
+————————————
+
+前言
+
+工程基于fastlio算法原理,加入了位置、姿态、速度观测,提供了 建图算法 与 基于先验地图定位算法 实现
+
+一、工程结构
+.
+├── build.sh                        # 编译脚本
+├── clear.sh                        # 清除脚本，清除编译生成文件
+├── CMakeLists.txt                  
+├── config                          # 加载配置参数
+├── data                            # 存放数据或程序结果
+├── include
+│   ├── fusion_slam                 # 算法文件夹
+│   │   ├── math                    # 数学公式
+│   │   ├── modules                 # 模块库
+│   │   │   ├── back                # 后端 类
+│   │   │   ├── front               # 前端 类
+│   │   │   ├── ieskf               # ieskf 类
+│   │   │   ├── map                 # 地图 类，涉及一些地图操作
+│   │   │   └── sensors             # 传感器 类,一些传感器算法相关处理
+│   │   └── type                    # 各种消息结构
+│   └── wrapper                     # 封装器
+│       └── ros                     # ros相关,数据格式转换、算法调用业务逻辑
+├── script                          # 各种分析脚本
+├── src                             
+│   ├── app                         # app
+│   ├── fusion_slam                 # 算法具体实现
+│   │   ├── math
+│   │   ├── modules
+│   │   │   ├── back
+│   │   │   ├── front
+│   │   │   ├── ieskf
+│   │   │   ├── map
+│   │   │   └── sensors
+│   │   └── type
+│   └── wrapper                     # 封装器实现
+│       └── ros
+├── test                            # 测试相关
+└── thirdparty                      # 第三方库
+
+二、编译
+
+1、novatel_msgs编译
+
+将thirdparty下novatel_msgs 拷贝到 catkin_ws/src/novatel_msgs
+
+cd catkin_ws
+
+catkin_make
+
+2、编译
+
+cd fusion_slam
+
+将novatel_msgs加载到当前工程环境中
+
+source ../catkin_ws/devel/setup.sh
+
+./build.sh
+
+三、运行
+
+在运行前,确保rosbag所有数据均已进行时空同步(时间源统一,使用硬件同步时钟.且完成了传感器间标定.lidar与rtk标定可参考本人工程calib_AXXB)
+
+cd fusion_slam 
+
+1、纯lio
+
+1.1 建图
+
+新开三个终端
+终端1 : ./script/run_mapping_rviz.sh
+终端2 : ./bin/fusion_slam_node config/cfg_park_dataset.yaml
+终端3 : rosbag play --clock --pause '/home/data/datasets/lio-sam/park_dataset.bag' # 注意路径根据bag本地所在路径修改
+
+1.2 定位
+
+新开三个终端
+终端1 : ./script/run_loc_rviz.sh
+终端2 : ./bin/location_node config/cfg_park_dataset_loc.yaml
+终端3 : rosbag play --clock --pause '/home/data/datasets/lio-sam/park_dataset.bag' # 注意路径根据bag本地所在路径修改
+
+2、lio+rtk
+
+若使用rtk参与建图,需要保证rtk的精度(位置+姿态),否则建图效果很差。demo中boreas-2021-04-08-12-44_25s_155s.bag,rtk数据为IE后处理轨迹
+
+2.1 建图
+
+新开三个终端
+终端1 : ./script/run_mapping_rviz.sh
+终端2 : ./bin/fusion_slam_node config/cfg_boreas.yaml
+终端3 : rosbag play --clock --pause '/home/ylh/datasets/boreas/boreas-2021-04-08-12-44_25s_155s.bag' # 注意路径根据bag本地所在路径修改
+
+2.2 定位
+
+新开三个终端
+终端1 : ./script/run_loc_rviz.sh
+终端2 : ./bin/location_node config/cfg_boreas_loc.yaml
+终端3 : rosbag play --clock --pause '/home/ylh/datasets/boreas/boreas-2021-04-08-12-44_25s_155s.bag' # 注意路径根据bag本地所在路径修改
+
+四、其他说明
+
+1、ieskf
+
+工程集成了imu预测、多线lidar观测、位置观测、姿态观测、速度观测,可根据实际进行选择使用
+
+2、数据时间序列
+
+工程中,使用map,根据lidar覆盖时间区间进行多传感器数据纳秒级序列排序
+
+3、数据通信与算法实现分离
+
+保证工程使用便利,采用了ros通信框架
+
+算法实现部分与传感器数据传输，可根据实际需求进行修改
+
+4、一些有趣设计,请查看代码详细实现
+
+五、致谢
+
+感谢广大slamer开源作者们的贡献

@@ -185,6 +185,7 @@
   },
   "active": "577ddc345f17da21",
   "lastOpenFiles": [
+    "raw/codes/MANIFEST.md",
     "wiki/sources/2026-04-28-superodom-analysis.md",
     "wiki/entities/方法-6-DoF 退化检测.md",
     "wiki/entities/方法-SmartStereoFactor.md",
@@ -229,7 +230,6 @@
     "raw/codes/Kimera-VIO/tests/data/MicroEurocDataset/LICENSE.md",
     "raw/codes/LIO-SAM/config/doc/kitti2bag/README.md",
     "raw/codes/FAST-LIVO2/Log/result/ntu_viral/README.md",
-    "raw/codes/IC-GVINS/ic_gvins/thirdparty/abseil-cpp/UPGRADES.md",
-    "raw/codes/IC-GVINS/ic_gvins/thirdparty/abseil-cpp/README.md"
+    "raw/codes/IC-GVINS/ic_gvins/thirdparty/abseil-cpp/UPGRADES.md"
   ]
 }

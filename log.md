@@ -197,3 +197,8 @@
 - 按视觉几何、滤波融合、LiDAR 配准/地图、学习式/可微地图四组扩展 20 个实体页的 `Agent 实现提示`
 - 覆盖 PnP、三角化、Shi-Tomasi、GMS、SmartStereoFactor、IMU 预积分、MSCKF、IESKF、IMU deskew、统一 IESKF 融合、ICP/GICP/Fast-VGICP、VoxelHashMap、ScanContext、ConvGRU、RAFT、3D Gaussian Splatting、可微渲染、SDF 解码器
 - 每页补充适用场景、输入输出契约、伪代码实现骨架、真实 `raw/codes/` 源码片段、实现注意事项和源码检索锚点，便于 AI agent 检索后直接进入实现
+
+## 2026-04-30 maintenance | raw/codes 源码快照化
+- 将 `raw/codes/` 明确定义为只读源码快照区，而不是嵌套 Git 仓库或 submodule
+- 新增 `raw/codes/MANIFEST.md` 记录各源码项目的 upstream、分支、HEAD commit 和删除 `.git` 前的 dirty 状态
+- 更新 `AGENTS.md` 与 `.wiki-schema.md`：后续新增或替换源码快照时，必须先记录版本来源，再维护 wiki 中的源码行号锚点

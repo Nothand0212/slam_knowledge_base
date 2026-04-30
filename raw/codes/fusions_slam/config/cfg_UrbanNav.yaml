@@ -1,0 +1,43 @@
+wrapper:
+  save_pose: true
+  lidar_line_num: 32 # 表示lidar线数目为128线
+  point_gap_num: -1 # -1 表示不跳点, 5表示隔5点取一个点
+  lidar_topic: "/velodyne_points"
+  imu_topic: "/imu/data"
+  rtk_topic: "/novatel_data/inspvax"
+  lidar_xy_box: [-2.0, 2.0, -2.0, 2.0] # xmin xmax ymin ymax
+  use_rtk: false
+  lidar_type: 1 # 1 velodyne 2 ouster
+  rtk_date_type :  1 # 1 novatel_msgs/INSPVAX  2 sensor_msgs/NavSatFix 3 nav_msgs/Odometry
+  T_imu_lidar: [  0, 1, 0, 0, 
+                  -1, 0, 0, 0, 
+                  0, 0, 1, 0.28,
+                  0, 0, 0, 1]
+  T_imu_ant: [  1, 0, 0, 0,
+                0, 1, 0, 0.86,
+                0, 0, 1, -0.31,
+                0, 0, 0, 1]
+
+front:
+  leaf_size: 0.3
+  imu_init_duration: 0.1
+
+map:
+  map_resolution: 0.2
+  local_map_length: 1000.0
+  save_map: true
+  save_path: "data/map_UrbanNav.pcd"
+  map_leaf_size: 0.3
+  
+propagate:
+  rtk_type: 0 
+  rtk_trans_noise: [0.5, 0.5, 100.0]
+  rtk_rpy_noise: [0.1, 0.1, 0.1]
+
+ieskf:
+  update_ba_bg: false
+  cov_gyroscope: 0.1
+  cov_acceleration: 0.1
+  cov_bias_acceleration: 0.0001
+  cov_bias_gyroscope: 0.0001
+  imu_hz: 400

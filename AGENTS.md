@@ -91,6 +91,11 @@ Rules for this section:
 
 - `raw/codes/` is a read-only source snapshot for wiki citations and short
   code snippets. Do not edit files under `raw/codes/`.
+- Subprojects under `raw/codes/` must not keep nested `.git` metadata. Treat
+  them as copied source snapshots, not submodules or development worktrees.
+- Before replacing or adding a `raw/codes/` project snapshot, record its
+  upstream URL, branch/tag, commit hash, copy date, and any local dirty files in
+  `raw/codes/MANIFEST.md`.
 - Verify every `raw/codes/...:Lx-Ly` anchor points to an existing file and a
   reasonable line range.
 - Keep Markdown code fences balanced.

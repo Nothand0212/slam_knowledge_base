@@ -1,0 +1,3 @@
+wrapper:
+  lio_topic: "/lio_odom"
+  rtk_topic: "/gps_odom_post"
