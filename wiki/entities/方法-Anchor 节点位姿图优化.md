@@ -229,6 +229,132 @@ double calcInformationGainBtnTwoNodes(target_node, source_node):
 
 选择信息增益最大的目标节点，确保每条新增的回环边都对图优化贡献最大化。
 
+## Agent 实现提示
+
+### 适用场景
+
+- 多会话 LiDAR/视觉 SLAM 系统中，需要将多个独立 session 的局部轨迹统一到同一中心坐标系
+- 需要实现增量式的多 session 联合位姿图优化（ISAM2 增量求解）
+- 跨 session 的回环边（SC/RS 配准）需要同时约束两个 session 的 anchor 变量和关键帧位姿
+
+### 输入输出契约
+
+**initTrajectoryByAnchoring（anchor 初始化）**
+- 输入：`Session` 对象（含 `is_base_session_` 标志）
+- 输出：anchor 节点插入因子图（base session 用 `priorNoise ~1e-12` 强先验，查询 session 用 `largeNoise ~π²` 弱先验），初始估计为单位位姿 `poseOrigin`
+- 前置条件：全局节点索引 `genAnchorNodeIdx(sess.index_)` 产生唯一整数 ID
+
+**addSCLoops（跨 session 回环添加）**
+- 输入：源/目标 session 的节点索引、SC 配准得到的相对位姿 `relative_pose`
+- 输出：`BetweenFactorWithAnchoring<Pose3>` 四变量因子插入因子图
+- 四变量：`(key1=target_node, key2=source_node, anchor_key1=target_anchor, anchor_key2=source_anchor)`
+
+**optimizeMultisesseionGraph（增量优化）**
+- 输入：`toOpt` 布尔标志
+- 输出：`isamCurrentEstimate` 更新为最新估计值，`gtSAMgraph` 清空待下一轮增量添加
+- 优化次数：`isam->update()` × 5 次确保收敛
+
+### 实现骨架（伪代码）
+
+```pseudo
+class BetweenFactorWithAnchoring(Pose3):
+    # 继承 NoiseModelFactor4<VALUE, VALUE, VALUE, VALUE>
+    # 四变量: p1, p2, anchor_p1, anchor_p2
+
+    def evaluateError(p1, p2, anchor_p1, anchor_p2, H1, H2, aH1, aH2):
+        # Step 1: 局部 → 中心坐标系
+        hx1 = anchor_p1.Compose(p1)     # T_center = T_anchor * T_local
+        hx2 = anchor_p2.Compose(p2)
+        # Step 2: 中心坐标系相对位姿
+        hx = hx1.Between(hx2)           # T_rel = hx1⁻¹ * hx2
+        # Step 3: 与测量值比较（切空间误差）
+        return measured.Local(hx)       # e = Log(T_measured⁻¹ * hx)
+
+def addSessionGraph(session):
+    # 1. 添加 anchor 节点（强弱先验）
+    anchor_idx = genAnchorNodeIdx(session.index)
+    if session.is_base_session:
+        graph.add(PriorFactor(anchor_idx, identity, priorNoise=1e-12))
+    else:
+        graph.add(PriorFactor(anchor_idx, identity, largeNoise=π²/1e8))
+
+    # 2. 添加 odom/loop 边（同一 session 内部）
+    for each (from, to, relative_pose) in session.edges:
+        graph.add(BetweenFactor(from, to, relative_pose, odomNoise))
+
+    # 3. 添加跨 session 回环边（四个变量）
+    for each (target, source, relative_pose) in cross_session_loops:
+        graph.add(BetweenFactorWithAnchoring(
+            target.node_idx, source.node_idx,
+            target.anchor_idx, source.anchor_idx,
+            relative_pose, robustNoise))
+
+def optimizeMultisesseionGraph():
+    isam.update(gtSAMgraph, initialEstimate)
+    repeat(5): isam.update()           # 5次迭代确保收敛
+    isamCurrentEstimate = isam.calculateEstimate()
+
+def updateSessionPoses():
+    for each frame in each session:
+        T_local = isamCurrentEstimate.at(frame.global_idx)
+        T_central = anchor_transform * T_local
+        write_to_cloudKeyPoses6D(T_central)
+```
+
+### 关键源码片段
+
+`raw/codes/lt-mapper/ltslam/include/ltslam/BetweenFactorWithAnchoring.h:L86-L99` — evaluateError 核心实现：
+```cpp
+Vector evaluateError(
+    const T& p1, const T& p2, const T& anchor_p1, const T& anchor_p2,
+    boost::optional<Matrix&> H1 = boost::none,
+    boost::optional<Matrix&> H2 = boost::none,
+    boost::optional<Matrix&> anchor_H1 = boost::none,
+    boost::optional<Matrix&> anchor_H2 = boost::none) const
+{
+    T hx1 = traits<T>::Compose(anchor_p1, p1, anchor_H1, H1);
+    T hx2 = traits<T>::Compose(anchor_p2, p2, anchor_H2, H2);
+    T hx  = traits<T>::Between(hx1, hx2, H1, H2);
+    return traits<T>::Local(measured_, hx);
+}
+```
+
+`raw/codes/lt-mapper/ltslam/src/LTslam.cpp:L565-L576` — anchor 先验注入：
+```cpp
+void LTslam::initTrajectoryByAnchoring(const Session& _sess) {
+    int this_session_anchor_node_idx = genAnchorNodeIdx(_sess.index_);
+    if(_sess.is_base_session_) {
+        gtSAMgraph.add(PriorFactor<gtsam::Pose3>(this_session_anchor_node_idx, poseOrigin, priorNoise));
+    } else {
+        gtSAMgraph.add(PriorFactor<gtsam::Pose3>(this_session_anchor_node_idx, poseOrigin, largeNoise));
+    }
+    initialEstimate.insert(this_session_anchor_node_idx, poseOrigin);
+}
+```
+
+### 实现注意事项
+
+1. **雅可比链自动推导**：GTSAM 的 `traits<T>::Compose`、`traits<T>::Between`、`traits<T>::Local` 自动解析计算所有解析雅可比和链式法则传递，**禁止手动编写**——否则与 GTSAM 的 Lie 群 conventions 可能不一致。
+2. **先验强弱选择是关键**：base session 的 anchor 用 `priorNoise ~1e-12` 紧紧固定，防止整个因子图刚体漂移（gauge freedom）。查询 session 用 `largeNoise ~π²`，允许 anchor 在优化中充分移动。
+3. **ISAM2 多轮 update 必须**：ISAM2 的增量优化单次 `update()` 可能未收敛，lt-mapper 连续调用 5 次。`relinearizeSkip=1` 确保新增因子后受影响变量重新线性化。
+4. **内部边 vs 跨 session 边**：同一 session 内的 odom/loop 边用普通二变量 `BetweenFactor`（不涉及 anchor），跨 session 边必须用四变量 `BetweenFactorWithAnchoring`。
+5. **信息增益选择回环**：RS 回环不是盲目添加最近邻，而是通过 `calcInformationGainBtnTwoNodes` 计算边缘协方差选择信息增益最大的目标节点。
+
+### 源码检索锚点
+
+| 组件 | 文件 | 行号 |
+|------|------|------|
+| BetweenFactorWithAnchoring 类定义 | `raw/codes/lt-mapper/ltslam/include/ltslam/BetweenFactorWithAnchoring.h` | L18–L127 |
+| evaluateError 核心实现 | `raw/codes/lt-mapper/ltslam/include/ltslam/BetweenFactorWithAnchoring.h` | L86–L99 |
+| anchor 先验初始化 | `raw/codes/lt-mapper/ltslam/src/LTslam.cpp` | L565–L576 |
+| 内部图构建（odom + loop 边） | `raw/codes/lt-mapper/ltslam/src/LTslam.cpp` | L579–L621 |
+| SC 回环（四变量因子） | `raw/codes/lt-mapper/ltslam/src/LTslam.cpp` | L370–L416 |
+| RS 回环 + 信息增益选择 | `raw/codes/lt-mapper/ltslam/src/LTslam.cpp` | L419–L448 |
+| ISAM2 增量优化 | `raw/codes/lt-mapper/ltslam/src/LTslam.cpp` | L157–L184 |
+| 优化后位姿更新 | `raw/codes/lt-mapper/ltslam/src/Session.cpp` | L66–L88 |
+| 全局 ID 生成 | `raw/codes/lt-mapper/ltslam/src/utility.cpp` | L37–L47 |
+| Session 数据结构 | `raw/codes/lt-mapper/ltslam/include/ltslam/Session.h` | L24–L68 |
+
 ## 相关页面
 
 - [[方法-多会话坐标系对齐]] — anchor 机制在多 session 后端中的完整应用流程

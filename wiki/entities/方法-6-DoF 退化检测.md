@@ -153,6 +153,141 @@ gtsam::PriorFactor<Pose3> pose_factor(X(key), curPose,
 | **子空间投影** | 按 (1-unc) 连续权重 | matP = V⁻¹·V' 硬投影 |
 | **在线实时性** | 每帧做 Ceres Covariance + 直方图 | 仅首轮迭代做一次特征值分解 |
 
+## Agent 实现提示
+
+### 适用场景
+
+- LiDAR 扫描匹配中某些方向几何约束不足时（长廊、平面墙、开阔地），需要对退化方向抑制更新
+- 需要实时输出 6-DoF 不确定性（下游规划器/融合模块的可信度输入）
+- 多传感器融合系统中需要根据退化状态动态切换位姿预测源（VIO/Neural-IMU/LiDAR）
+
+### 输入输出契约
+
+**SuperLoc 退化检测（双层）**
+- 第一层输入：匹配的平面特征集合 `PlaneFeatureHistogramObs[9]`（6 旋转 + 3 平移可观测性）
+- 第一层输出：`uncertainty_x/y/z/roll/pitch/yaw` 6 维归一化不确定性 [0,1]
+- 第二层输入：Ceres 优化后参数块协方差矩阵
+- 第二层输出：`PositionError`（最大平移标准差）、`OrientationError`（最大旋转标准差，deg）、`PosInverseConditionNum`（条件数倒数）
+
+**LIO-SAM 退化投影**
+- 输入：首轮 LM 迭代的法方程矩阵 `matAtA = J^T J`（6×6）
+- 输出：投影矩阵 `matP = V⁻¹·V'`（退化方向行置零后的 V 与原 V⁻¹ 乘积），退化标志 `isDegenerate`
+- 阈值：`eignThre[6] = {100, 100, 100, 100, 100, 100}`
+
+### 实现骨架（伪代码）
+
+```pseudo
+# === SuperLoc 双层退化检测 ===
+
+def DetectDegeneracy_SuperLoc(matched_planes, ceres_covariance):
+    # 第一层：特征可观测性直方图
+    PlaneFeatureHistogramObs[9] = [0]*9  # 6 rot + 3 trans
+    for plane in matched_planes:
+        centroid_p = plane.centroid
+        normal_n = plane.normal.normalized()
+        rot_moment = cross(centroid_p, normal_n)
+        # 累积各方向可观测性分量
+        PlaneFeatureHistogramObs[0] += abs(rot_moment.x())  # roll
+        PlaneFeatureHistogramObs[1] += abs(rot_moment.y())  # pitch
+        PlaneFeatureHistogramObs[2] += abs(rot_moment.z())  # yaw
+        PlaneFeatureHistogramObs[6] += abs(normal_n.x())    # x-trans
+        PlaneFeatureHistogramObs[7] += abs(normal_n.y())    # y-trans
+        PlaneFeatureHistogramObs[8] += abs(normal_n.z())    # z-trans
+    # 归一化到 [0,1]，0=不可观，1=完全可观
+    uncertainty = 1.0 - min(histogram / max_obs_count, 1.0)
+
+    # 第二层：Ceres 协方差分解
+    cov = ceres_covariance.topLeftCorner<3,3>()
+    eig = SelfAdjointEigenSolver(cov)
+    pos_error = sqrt(eig.eigenvalues()(2))       # 最大标准差
+    inv_cond = sqrt(λ_min) / sqrt(λ_max)          # 条件数倒数
+    return uncertainty, pos_error, inv_cond
+
+# === LIO-SAM 退化投影 ===
+
+def DetectDegeneracy_LIOSAM(J_r, residual):
+    H = J_r.T * J_r                          # 6×6 近似 Hessian
+    eigenvalues, V = eigen(H)                 # 特征值分解
+    V2 = copy(V)
+    is_degenerate = False
+    for i in range(5, -1, -1):               # 从最小特征值检查
+        if eigenvalues[i] < 100:
+            V2.row(i).setZero()              # 退化方向行置零
+            is_degenerate = True
+        else:
+            break
+    P = V.inv() * V2                         # 投影矩阵
+    dx_corrected = P * dx_raw                # 退化方向增量归零
+    return dx_corrected, is_degenerate
+```
+
+### 关键源码片段
+
+`raw/codes/LIO-SAM/src/mapOptmization.cpp:L1229-L1258` — LIO-SAM 退化投影核心：
+```cpp
+if (iterCount == 0) {
+    cv::Mat matE(1, 6, CV_32F, cv::Scalar::all(0));
+    cv::Mat matV(6, 6, CV_32F, cv::Scalar::all(0));
+    cv::Mat matV2(6, 6, CV_32F, cv::Scalar::all(0));
+    cv::eigen(matAtA, matE, matV);
+    matV.copyTo(matV2);
+    isDegenerate = false;
+    float eignThre[6] = {100, 100, 100, 100, 100, 100};
+    for (int i = 5; i >= 0; i--) {
+        if (matE.at<float>(0, i) < eignThre[i]) {
+            for (int j = 0; j < 6; j++) {
+                matV2.at<float>(i, j) = 0;
+            }
+            isDegenerate = true;
+        } else { break; }
+    }
+    matP = matV.inv() * matV2;
+}
+if (isDegenerate) {
+    cv::Mat matX2(6, 1, CV_32F, cv::Scalar::all(0));
+    matX.copyTo(matX2);
+    matX = matP * matX2;
+}
+```
+
+`raw/codes/SuperOdom/super_odometry/src/LidarProcess/LidarSlam.cpp:L860-L894` — Ceres 协方差分解（伪代码还原）：
+```cpp
+// EstimateRegistrationError — 需定位到 LidarSlam.cpp
+Covariance::Options cov_options;
+Covariance covariance(cov_options);
+covariance.Compute(parameter_blocks, &problem);
+double cov_mat[36];
+covariance.GetCovarianceMatrix(parameter_blocks, cov_mat);
+Eigen::Map<Eigen::Matrix<double,6,6>> errCov(cov_mat);
+
+Eigen::SelfAdjointEigenSolver<Eigen::Matrix3d> eigPos(errCov.topLeftCorner<3,3>());
+err.PositionError = sqrt(eigPos.eigenvalues()(2));       // 最大平移标准差
+err.PosInverseConditionNum = sqrt(λ0) / sqrt(λ2);        // 条件数倒数
+
+Eigen::SelfAdjointEigenSolver<Eigen::Matrix3d> eigOri(errCov.bottomRightCorner<3,3>());
+err.OrientationError = Rad2Deg(sqrt(eigOri.eigenvalues()(2)));  // 最大旋转标准差
+```
+
+### 实现注意事项
+
+1. **退化判定时机**：LIO-SAM 的退化投影仅在首轮 LM 迭代（`iterCount == 0`）做一次，后续迭代复用同一个投影矩阵 `matP`。SuperLoc 则每帧都做双层检测。
+2. **从最小特征值遍历**：LIO-SAM 从索引 5（最小特征值）向 0 遍历，遇到第一个满足阈值的就 `break`。这确保只有连续的小特征值方向被抑制，避免过度投影。
+3. **噪声调节 vs 投影修正**：LIO-SAM 用投影矩阵归零退化方向增量（硬抑制），而因子图层面通过噪声二元切换（`correctionNoise2` 放大 ~100 倍）使 IMU 主导。两者是互补的。
+4. **yaw 方向特殊处理**：SuperLoc 对 yaw 方向信息矩阵置零（自由估计），因为 LiDAR 在平面环境中 yaw 通常不可观。LIO-SAM 用统一阈值处理所有方向。
+5. **实时性权衡**：Ceres Covariance 计算代价较高（需要求解法方程逆），SuperLoc 的协方差层可能影响实时性。第一层特征直方图计算开销小，可每帧执行。
+
+### 源码检索锚点
+
+| 系统 | 文件 | 功能 | 行号 |
+|------|------|------|------|
+| LIO-SAM | `mapOptmization.cpp` | 退化投影（Hessian 特征值分解） | L1229–L1258 |
+| LIO-SAM | `imuPreintegration.cpp` | 噪声二元切换（`correctionNoise`/`correctionNoise2`） | L223–L224, L378 |
+| SuperOdom | `LidarSlam.cpp` | EstimateLidarUncertainty（特征直方图） | L921–L959 |
+| SuperOdom | `LidarSlam.cpp` | EstimateRegistrationError（Ceres 协方差分解） | L860–L894 |
+| SuperOdom | `LidarSlam.cpp` | SE3 先验约束注入（退化 DoF 加权） | L287–L303 |
+| SuperOdom | `laserMapping.cpp` | 预测源切换（VIO/Neural-IMU 降级） | L384–L411 |
+| ROLO | `backMapping.cpp` | 退化投影（Hessian 特征值 <100） | L844–L866 |
+
 ## 相关页面
 
 - 实现：[[方法-SuperLoc退化检测实现]] `LidarSlam.cpp:921-992`、[[算法-ROLO-SLAM]] `backMapping.cpp:844-866`

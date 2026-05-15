@@ -272,6 +272,121 @@ $$\mathbf{p}_{F}^{C_i} = \mathbf{R}_{C_0 C_i} \mathbf{R}_{IC}^{\top} \left( \mat
 3. **重力模长约束**：已知 $|\mathbf{g}| \approx 9.81$，利用此先验减少 1 DoF 不确定度。VINS-Fusion 用切空间参数化，ORB-SLAM3 用 SO(3) 旋转矩阵，open_vins 用约束闭式解。
 4. **预积分重传播**：偏置更新后必须重新计算 IMU 预积分值，确保预积分与最新偏置估计一致。
 
+## Agent 实现提示
+
+### 适用场景
+
+- 单目/双目 VIO 系统启动阶段，需要从视觉位姿和 IMU 数据中恢复尺度、重力方向、速度、偏置
+- 需要对比或实现不同 VIO 系统的初始化管线（VINS-Fusion / ORB-SLAM3 / open_vins）
+- 设计新的 VIO 初始化方法时，参考现有方案的分阶段解耦策略
+
+### 输入输出契约
+
+**VINS-Fusion 初始化**
+- 输入：多帧图像特征跟踪结果（`all_image_frame`，含特征点 2D 坐标和帧位姿初值）、IMU 预积分
+- 输出：尺度 `s`、重力方向（对齐到世界系）、各帧速度 `V_i`、陀螺偏置 `Bgs`、校正后的帧位姿 `Ps/Rs`
+- 失败条件：IMU 激励方差 < 0.25（movement excitation insufficient）
+
+**ORB-SLAM3 初始化**
+- 输入：已有视觉地图（≥10 个关键帧，持续时间 ≥2s 单目/1s 双目）、关键帧间 IMU 预积分
+- 输出：尺度、重力方向（SO(3) 旋转矩阵）、各 KF 速度、陀螺/加计偏置
+- 失败条件：优化后 `scale < 0.1` 或地图关键帧数不足
+
+**open_vins 动态初始化**
+- 输入：特征点数据库（≥min_valid_features 个特征，每特征 ≥min_num_meas_to_optimize 次观测）、IMU 数据、相机外参
+- 输出：全状态初始值 + 协方差矩阵（特征点位置、速度、重力方向），后续可选 Ceres MLE 精化
+
+### 实现骨架（伪代码）
+
+```pseudo
+def VIO_Initialize(frames, imu_data, mode):
+    # Phase 0: 激励检查
+    if compute_imu_excitation_variance(imu_data) < 0.25:
+        return FAIL("insufficient excitation")
+
+    # Phase 1: 视觉初始化（获取无尺度位姿）
+    if mode == VINS:
+        poses = run_5pt_essential_matrix + Global_SfM + BA(frames)
+    elif mode == ORB_SLAM3:
+        poses = reuse_existing_visual_map()  # ORB 地图已就绪
+    elif mode == open_vins:
+        passes = True  # 动态初始化不需要显式 SfM
+
+    # Phase 2: 陀螺偏置估计（旋转约束）
+    bg = solve_gyro_bias(imu_preintegrations, visual_rotations)
+    repropagate_all_preintegrations(bg)  # 必须重传播
+
+    # Phase 3: 速度 + 重力 + 尺度联合求解
+    if mode == VINS:
+        v, g, s = solve_linear_alignment()       # LDLT 闭式解
+        g = refine_gravity_tangent_space(g)       # 切空间 4 次迭代
+    elif mode == ORB_SLAM3:
+        v, g, s, bg, ba = g2o_inertial_optim()   # LM 200 次迭代
+    elif mode == open_vins:
+        v, g, features = solve_closed_form()      # |g|=9.81 约束 + 伴随矩阵
+        v, g, features, ba = ceres_mle_refine()   # Ceres 精化
+
+    # Phase 4: 重力对齐到世界系
+    Rwg = rotation_aligning_g_to_world(g)
+    rotate_all_states(Rwg)
+    retriangulate_features()
+
+    return {scale: s, gravity: g, velocities: v, biases: (bg, ba)}
+```
+
+### 关键源码片段
+
+`raw/codes/VINS-Fusion/vins_estimator/src/initial/initial_aligment.cpp:L209-L217` — VisualIMUAlignment 顶层调用：
+```cpp
+bool VisualIMUAlignment(map<double, ImageFrame> &all_image_frame, Vector3d* Bgs, Vector3d &g, VectorXd &x)
+{
+    solveGyroscopeBias(all_image_frame, Bgs);
+    if(LinearAlignment(all_image_frame, g, x))
+        return true;
+    else
+        return false;
+}
+```
+
+`raw/codes/ORB_SLAM3/src/LocalMapping.cc:L1173-L1319` — InitializeIMU 核心逻辑（非惯性优化入口）：
+```cpp
+// 重力方向粗估计
+dirG.setZero();
+for(size_t i=0; i<vpKF.size()-1; i++) {
+    Velocity vel = IMU::Preintegrated::GetAverageVelocity(...);
+    dirG -= rotation * vel;   // 累积多个帧对的加速度方向
+}
+dirG = dirG/dirG.norm();
+Rwg = rotation_that_aligns(dirG, (0,0,-1));
+
+// g2o 优化: 200 iterations
+Optimizer::InertialOptimization(mpMap, Rwg, scale, bg, ba, ...);
+```
+
+### 实现注意事项
+
+1. **顺序不可颠倒**：必须先解陀螺偏置再解重力/速度/尺度。陀螺偏置误差会在预积分中通过时间累积放大对平移的影响，若颠倒顺序会导致重力方向估计严重偏差。
+2. **预积分重传播必须执行**：每次偏置更新后立即 `repropagate()` / `Reintegrate()`，否则后续速度/重力求解会使用带旧偏置的预积分值。
+3. **重力模长先验不可或缺**：已知 $|\mathbf{g}| \approx 9.81$ 约束可减少 1 DoF 不确定度。VINS 用切空间参数化（2-DoF），ORB-SLAM3 用 SO(3)（2-DoF），open_vins 用等式约束闭式解。
+4. **加速度计偏置短窗口不可观**：若运动激励不足（匀速直线），$\mathbf{b}_a$ 与重力耦合，短窗口内无法分离。VINS 在线性阶段不优化 $\mathbf{b}_a$，ORB-SLAM3 依赖先验约束，open_vins 依赖较长窗口和 MLE。
+5. **视觉旋转质量决定初始化成败**：三种方法都依赖视觉旋转估计的精度。若视觉 SfM 失败（特征少、视差不足），后续所有阶段都会传播误差。
+
+### 源码检索锚点
+
+| 系统 | 文件 | 函数/位置 | 行号 |
+|------|------|-----------|------|
+| VINS-Fusion | `initial_aligment.cpp` | `solveGyroscopeBias()` | L14–L47 |
+| VINS-Fusion | `initial_aligment.cpp` | `LinearAlignment()` | L135–L207 |
+| VINS-Fusion | `initial_aligment.cpp` | `RefineGravity()` | L65–L133 |
+| VINS-Fusion | `initial_sfm.cpp` | `GlobalSFM::construct()` | L128–L323 |
+| VINS-Fusion | `estimator.cpp` | `visualInitialAlign()` | L726–L784 |
+| ORB-SLAM3 | `LocalMapping.cc` | `InitializeIMU()` | L1173–L1319 |
+| ORB-SLAM3 | `Optimizer.cc` | `InertialOptimization（全变量）` | L3042–L3224 |
+| ORB-SLAM3 | `Optimizer.cc` | `InertialOptimization（仅偏置）` | L3227–L3387 |
+| open_vins | `DynamicInitializer.cpp` | `initialize()` 全流程 | L44–L1107 |
+| open_vins | `StaticInitializer.cpp` | `initialize()` 静止模式 | L37–L164 |
+| open_vins | `InertialInitializer.cpp` | 模式切换逻辑 | L79 |
+
 ## 相关页面
 
 - [[概念-视觉惯性初始化策略]]

@@ -317,6 +317,114 @@ $$\text{Sim}(3) = \left\{ S = \begin{bmatrix} s\mathbf{R} & \mathbf{t} \\ \mathb
 
 对关键帧速度传播：$\mathbf{v}^{\text{corrected}} = \mathbf{R}_{\text{cor}} \cdot \mathbf{v}^{\text{uncorrected}}$，其中 $\mathbf{R}_{\text{cor}} = \text{spin}(T_{\text{corrected}}^{\text{world}}) \cdot \text{spin}(T_{\text{uncorrected}}^{\text{world}})^{-1}$
 
+## Agent 实现提示
+
+### 适用场景
+
+- 需要实现多地图/多会话 SLAM 系统，支持跟踪丢失后自动新建子图
+- 回环检测触发跨地图合并时，需要将两个独立地图焊接为统一坐标系
+- 需要全局 BA 校正后，将结果传播到未参与优化的新创建关键帧
+
+### 输入输出契约
+
+**CreateNewMap**
+- 输入：无（从 Atlas 内部状态 `mpCurrentMap` 读取）
+- 输出：新建的 `Map` 对象，已插入 `mspMaps`，设为 `mpCurrentMap`
+- 副作用：旧地图标记为 `SetStoredMap()`，`mnLastInitKFidMap` 更新为旧地图最大 KF ID + 1
+
+**MergeLocal（核心合并）**
+- 输入：当前关键帧 `mpCurrentKF`、匹配关键帧 `mpMergeMatchedKF`（跨地图共视）、Sim3 变换 `mg2oMergeScw`
+- 输出：`mpCurrentKF` 所在地图的所有关键帧/地图点校正后迁移至合并地图，被合并地图标记为 `Bad`
+- 副作用：停止 LocalMapping 线程、翻转 Essential Graph 生成树、触发焊接 BA + Essential Graph 优化
+
+**LoopCorrectConn（全局 BA 传播）**
+- 输入：活跃地图 `pActiveMap`、回环关键帧 ID `nLoopKF`
+- 输出：全局 BA 校正位姿 (`mTcwGBA`) 沿生成树传播到所有未参与 BA 的关键帧/地图点
+
+### 实现骨架（伪代码）
+
+```pseudo
+class Atlas:
+    mspMaps: set<Map*>        # 活跃地图集合（按指针排序）
+    mspBadMaps: set<Map*>     # 待清理的废弃地图
+    mpCurrentMap: Map*        # 当前活跃地图
+    mpKeyFrameDB: KeyFrameDatabase*  # 全局共享关键帧数据库
+    mnLastInitKFidMap: ulong  # 上次初始化时的最大 KF ID
+
+def CreateNewMap():
+    lock(mMutexAtlas)
+    if mpCurrentMap != null:
+        mnLastInitKFidMap = max(mnLastInitKFidMap, mpCurrentMap.GetMaxKFid() + 1)
+        mpCurrentMap.SetStoredMap()
+    mpCurrentMap = new Map(mnLastInitKFidMap)
+    mpCurrentMap.SetCurrentMap()
+    mspMaps.insert(mpCurrentMap)
+
+def ChangeMap(pMap):
+    lock(mMutexAtlas)
+    if mpCurrentMap != null:
+        mpCurrentMap.SetStoredMap()
+    mpCurrentMap = pMap
+    mpCurrentMap.SetCurrentMap()
+
+def SetMapBad(pMap):
+    lock(mMutexAtlas)
+    mspMaps.erase(pMap)
+    mspBadMaps.insert(pMap)
+```
+
+### 关键源码片段
+
+`raw/codes/ORB_SLAM3/src/Atlas.cc:L58-L77` — CreateNewMap 完整实现：
+```cpp
+void Atlas::CreateNewMap()
+{
+    unique_lock<mutex> lock(mMutexAtlas);
+    if(mpCurrentMap){
+        if(!mspMaps.empty() && mnLastInitKFidMap < mpCurrentMap->GetMaxKFid())
+            mnLastInitKFidMap = mpCurrentMap->GetMaxKFid()+1;
+        mpCurrentMap->SetStoredMap();
+    }
+    mpCurrentMap = new Map(mnLastInitKFidMap);
+    mpCurrentMap->SetCurrentMap();
+    mspMaps.insert(mpCurrentMap);
+}
+```
+
+`raw/codes/ORB_SLAM3/src/Atlas.cc:L79-L89` — ChangeMap 实现：
+```cpp
+void Atlas::ChangeMap(Map* pMap)
+{
+    unique_lock<mutex> lock(mMutexAtlas);
+    if(mpCurrentMap){
+        mpCurrentMap->SetStoredMap();
+    }
+    mpCurrentMap = pMap;
+    mpCurrentMap->SetCurrentMap();
+}
+```
+
+### 实现注意事项
+
+1. **地图 ID 不可回收**：`Map::nNextId` 是静态全局计数器，递增不回收。即使地图被删除，ID 也永久跳过，保证序列化/日志可追溯。
+2. **互斥锁范围**：`CreateNewMap`、`ChangeMap`、`SetMapBad` 都必须持有 `mMutexAtlas`，因为多线程（Tracking、LoopClosing）可能同时操作 Atlas。
+3. **地图合并的线程安全**：MergeLocal 执行前必须 `RequestStop()` LocalMapping 并清空其队列，防止焊接期间有新关键帧插入被合并地图。
+4. **Essential Graph 翻转**：合并后 `mpCurrentKF` 的生成树父子关系必须翻转——原父节点变子节点，`mpMergeMatchedKF` 成为新父节点。这是位姿链正确性的关键。
+5. **惯性模式下扩展窗口**：MergeLocal 在惯性模式下额外沿时间链（`mPrevKF`/`mNextKF`）扩展局部窗口，确保 IMU 预积分约束的连续性。
+
+### 源码检索锚点
+
+| 功能 | 文件 | 行号 |
+|------|------|------|
+| Atlas 类定义 | `raw/codes/ORB_SLAM3/include/Atlas.h` | L49–L169 |
+| CreateNewMap | `raw/codes/ORB_SLAM3/src/Atlas.cc` | L58–L77 |
+| ChangeMap | `raw/codes/ORB_SLAM3/src/Atlas.cc` | L79–L89 |
+| SetMapBad | `raw/codes/ORB_SLAM3/src/Atlas.cc` | L260–L266 |
+| MergeLocal 主流程 | `raw/codes/ORB_SLAM3/src/LoopClosing.cc` | L1215–L1780 |
+| MergeLocal2 简化合并 | `raw/codes/ORB_SLAM3/src/LoopClosing.cc` | L1783–L1832 |
+| LoopCorrectConn（全局 BA 传播） | `raw/codes/ORB_SLAM3/src/LoopClosing.cc` | L2268–L2400 |
+| Map 类定义 | `raw/codes/ORB_SLAM3/include/Map.h` | L41–L207 |
+
 ## 相关页面
 
 - [[算法-ORB-SLAM3]]
