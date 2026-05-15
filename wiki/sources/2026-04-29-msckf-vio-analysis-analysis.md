@@ -1,10 +1,10 @@
 ---
-tags: [VIO,[滤波,VIO,视觉惯性,MSCKF]]
+tags: [VIO, 滤波, 视觉惯性, MSCKF]
 sources:
   - raw/docs-deep-dive/msckf_vio_analysis.md
 created: 2026-04-29
 type: source
-updated: 2026-04-29
+updated: 2026-05-15
 source_path: raw/docs-deep-dive/msckf_vio_analysis.md
 ---
 

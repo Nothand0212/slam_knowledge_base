@@ -8,9 +8,11 @@ sources:
   - wiki/sources/2026-04-29-genz_icp_analysis.md
   - wiki/sources/2026-04-29-kiss_icp_analysis.md
 created: 2026-04-29
-updated: 2026-04-30
+updated: 2026-05-15
+superseded-by: [[方法-ICP变体族]]
 type: entity
 ---
+> 本页内容已归并至 [[方法-ICP变体族]]。
 
 # GICP配准方法
 

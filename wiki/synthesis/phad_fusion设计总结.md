@@ -1,6 +1,7 @@
 ---
 tags: [phad_fusion, SLAM, 因子图, GTSAM, 多传感器融合, 架构设计]
 created: 2026-04-28
+updated: 2026-05-14
 type: synthesis
 ---
 

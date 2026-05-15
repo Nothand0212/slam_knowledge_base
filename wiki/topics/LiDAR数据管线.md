@@ -1,8 +1,10 @@
 ---
 tags: [LiDAR, LiDAR管线, 数据管线, 传感器]
 created: 2026-04-29
-updated: 2026-04-29
-sources: [2026-04-29-lidar-pipeline-comparison]
+updated: 2026-05-02
+sources:
+  - 2026-04-29-lidar-pipeline-comparison
+  - wiki/sources/2026-05-02-p2v-slam.md
 ---
 
 # LiDAR 数据管线
@@ -31,9 +33,9 @@ sources: [2026-04-29-lidar-pipeline-comparison]
 ## 地图表示演化
 
 ```
-传统离散               结构化稀疏                连续/神经
+传统离散               结构化稀疏                  连续/神经
 Point Cloud → VoxelHashMap/VoxelMap → SDF/Neural Points
-KD-Tree      iKD-Tree/IVox3d/八叉树
+KD-Tree      iKD-Tree/IVox3d/八叉树 → 隐式点-体素观测(P2V-SLAM)
 ```
 
 ## 鲁棒核函数分布
@@ -48,12 +50,15 @@ KD-Tree      iKD-Tree/IVox3d/八叉树
 - 反向传播去畸变：fusions_slam, Lightning-LM, FAST-LIVO2
 - 统一 IESKF 紧耦合：FAST-LIVO2
 - Anchor 节点 PGO：lt-mapper（多会话对齐）
+- 隐式点-体素观测：P2V-SLAM（VE-Net 编码体素特征，IR-Net 输出残差与不确定度）
 
 ## 相关页面
 
 - [[LiDAR方案对比]]
 - [[算法-KISS-ICP]]
 - [[算法-FAST-LIO]]
+- [[算法-P2V-SLAM]]
 - [[方法-体素地图]]
+- [[方法-隐式点-体素观测模型]]
 - [[概念-连续时间轨迹]]
 - [[2026-04-29-lidar-pipeline-comparison]]

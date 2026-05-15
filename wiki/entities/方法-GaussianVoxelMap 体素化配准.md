@@ -2,10 +2,13 @@
 type: entity
 tags: [点云配准, 体素化, GICP, 最近邻搜索]
 created: 2026-04-29
-updated: 2026-04-29
+updated: 2026-05-15
+superseded-by: [[方法-LiDAR地图表示]]
 sources:
   - wiki/sources/2026-04-28-gtsam_points-analysis.md
 ---
+
+> 本页内容已归并至 [[方法-LiDAR地图表示]]。
 
 # GaussianVoxelMap 体素化配准
 

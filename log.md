@@ -4,6 +4,78 @@
 
 ---
 
+## 2026-05-15 maintenance | 分批归并：4 主题簇 + lint 全量通过
+
+- **归并页面**：
+  - [[方法-ICP变体族]] (427行)：归并 10 个 ICP 变体（点到点/点到面/GICP/VGICP/FastVGICP/APDGICP/NanoGICP/genz-icp/RotVGICP/点到分布/CT-ICP）
+  - [[方法-LiDAR地图表示]] (417行)：归并 4 种体素地图（VoxelHashMap/八叉树/GaussianVoxelMap/iKD-Tree）
+  - [[方法-GTSAM-Ceres工程因子]] (456行)：归并 4 种工程因子
+  - [[方法-鲁棒估计方法族]] (437行)：归并 Geman-McClure/自适应阈值/两轮粗差剔除
+- **22 个旧页**标记 `superseded-by`，未删除
+- **lint 全量通过**：孤页 0、断链 0、index 全部收录、sources 覆盖率 277/279
+- **更新页面**：index.md (21条新收录)、log.md
+
+## 2026-05-15 maintenance | 知识库维护：gbrain 导入 + 前端修复 + session 笔记规范化
+
+- **gbrain 导入**：将 262 个 wiki 页面全部导入 brain.db，生成 1543 个 embedding，支持全文搜索和语义搜索
+- **前端修复**：修复 `wiki/sources/2026-04-29-msckf-vio-analysis-analysis.md` 中嵌套 YAML tags 导致 gbrain 崩溃的问题；为 `wiki/sources/2026-05-02-p2v-slam.md` 补充缺失的 `type: source`
+- **session 笔记规范化**：
+  - 为 `wiki/synthesis/sessions/2026-05-14-vio-final-report.md` 补充完整的 YAML frontmatter
+  - 修复 `wiki/synthesis/sessions/2026-05-13-phad-slam-kf-rate-root-cause.md` 非标准 `updated: 2026-05-14 (final)` 格式
+  - 三份 session 笔记的 `updated` 统一更新至 2026-05-15
+- **更新页面**：log.md
+
+## 2026-05-15 maintenance | 工程实现知识扩展：滑动窗口/边缘化/KF选择/ISAM2
+
+- **来源**：`raw/codes/` 下 VINS-Fusion、ORB-SLAM3、Kimera-VIO 源码
+- **新增实体页**：
+  - [[方法-关键帧选择策略]]：三项目 KF 决策函数源码级对比
+  - [[方法-滑动窗口边缘化]]：VINS-Fusion Schur 补边缘化完整实现
+  - [[方法-ISAM2增量固定滞后平滑]]：iSAM2 贝叶斯树增量推理 vs 手动滑窗
+- **扩写页面**：[[概念-Schur补与边缘化]]、[[架构-滑动窗口优化]]
+- **更新页面**：log.md
+
+## 2026-05-15 maintenance | Subagent 并行深挖：初始化/回环/时间同步
+
+- **来源**：`raw/codes/` 下 VINS-Fusion、ORB-SLAM3、open_vins、lightning-lm、4DRadarSLAM 源码（3 subagent 并行）
+- **新增实体页（7 页，1703 行）**：
+  - [[方法-VIO初始化方法]] (278行)：三项目初始化管线对比 + 6 种设计模式
+  - [[方法-重力精细化]] (127行)：VINS 切空间重参数化 + 数学推导
+  - [[方法-IMU陀螺偏置初始化]] (150行)：VINS LDLT vs ORB-SLAM3 g2o LM 对比
+  - [[方法-视觉回环检测管线]] (269行)：三阶段（候选→几何验证→本质图）
+  - [[方法-LiDAR回环检测管线]] (293行)：ScanContext + ISC 五重回环
+  - [[方法-IMU-camera时间偏移估计]] (265行)：td 在线估计 + Jacobian
+  - [[方法-多传感器外参在线标定]] (321行)：三阶段标定 + SVD 手眼方程
+- **扩写页面（2 页）**：[[概念-视觉惯性初始化策略]]、[[传感器-传感器标定]]
+- **更新页面**：log.md
+
+## 2026-05-14 crystallize | VIO 精度优化完整实验报告
+
+- **来源**：会话结晶化（3 天，70+ 次实验）
+- **新增综合分析**：[[2026-05-14-vio-final-report]]
+- 覆盖从 BA 调试到自适应 KF 的完整优化历程，14/16 序列精度改善，最终 KF 配置收敛
+
+## 2026-05-02 ingest | P2V-SLAM 隐式点-体素 LiDAR-IMU SLAM
+
+- **素材来源**：微信公众号「3D视觉工坊」文章《告别平面与直线 | 华中科技大学提出隐式点-体素SLAM，突破几何约束瓶颈！》
+- **原始素材**：保存到 `raw/wechat/2026-05-02-p2v-slam/`，包含 Markdown 正文与 13 张本地图片
+- **新增素材摘要**：[[2026-05-02-p2v-slam]]
+- **新增实体页**：[[算法-P2V-SLAM]]、[[方法-隐式点-体素观测模型]]
+- **更新页面**：[[方法-体素地图]]、[[方法-IESKF滤波器]]、[[LiDAR数据管线]]、[[素材索引]]、wiki/overview.md、index.md、log.md
+- **实现提示**：[[方法-隐式点-体素观测模型]] 已补充 Agent 实现提示；由于 `p2v-slam` 源码尚未进入 `raw/codes/`，当前只提供伪代码和待补源码锚点
+
+## 2026-05-13 crystallize | 关键帧选择策略调研
+
+- **来源**：会话结晶化
+- **新增综合分析**：[[2026-05-13-kf-selection-survey]]（VINS-Fusion / ORB-SLAM3 / Kimera-VIO / OpenVINS KF 策略调研）
+- 提炼 4 个项目 KF 选择逻辑，为 phad_slam 自适应 KF 设计提供参考
+
+## 2026-05-13 crystallize | phad_slam KF 率根因与精度优化
+
+- **来源**：会话结晶化（多轮调试 + 基准测试）
+- **新增综合分析**：[[2026-05-13-phad-slam-kf-rate-root-cause]]
+- 从 iSAM2 线性化点漂移根因出发，解释 KF 率 72%→13% 的精度改善机制及自适应 KF 策略
+
 ## 2026-04-29 reorg | 实体页分类重组
 
 - **操作**：全部 167 个实体页按 7 大类重命名并合并重复页面

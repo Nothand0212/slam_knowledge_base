@@ -2,10 +2,12 @@
 type: entity
 tags: [点云配准, 4D雷达, GICP, 传感器模型, 各向异性]
 created: 2026-04-29
-updated: 2026-04-29
+updated: 2026-05-15
+superseded-by: [[方法-ICP变体族]]
 sources:
   - wiki/sources/2026-04-28-4d-radar-slam-analysis.md
 ---
+> 本页内容已归并至 [[方法-ICP变体族]]。
 
 # APDGICP 自适应概率分布 GICP
 

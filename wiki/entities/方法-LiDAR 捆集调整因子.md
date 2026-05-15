@@ -2,10 +2,13 @@
 type: entity
 tags: [bundle-adjustment, LiDAR, 特征值最小化, 因子图优化]
 created: 2026-04-29
-updated: 2026-04-29
+updated: 2026-05-15
+superseded-by: [[方法-GTSAM-Ceres工程因子]]
 sources:
   - wiki/sources/2026-04-28-gtsam_points-analysis.md
 ---
+
+> 本页内容已归并至 [[方法-GTSAM-Ceres工程因子]]。
 
 # LiDAR 捆集调整因子
 

@@ -3,9 +3,12 @@ tags: [优化, 鲁棒核, ICP]
 sources:
   - wiki/sources/2026-04-29-kiss_icp_analysis.md
 created: 2026-04-29
+updated: 2026-05-15
 type: entity
-updated: 2026-04-29
+superseded-by: [[方法-鲁棒估计方法族]]
 ---
+
+> 本页内容已归并至 [[方法-鲁棒估计方法族]]。
 
 # Geman-McClure鲁棒核
 

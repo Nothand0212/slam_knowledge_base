@@ -2,12 +2,15 @@
 type: entity
 tags: [GNSS, Ceres, 位置因子, 残差模型, 杆臂]
 created: 2026-04-29
-updated: 2026-04-29
+updated: 2026-05-15
+superseded-by: [[方法-GTSAM-Ceres工程因子]]
 sources:
   - wiki/sources/2026-04-28-ic_gvins-analysis.md
   - wiki/sources/2026-04-28-ob_gins-analysis.md
   - wiki/sources/2026-04-29-external-primary-source-check.md
 ---
+
+> 本页内容已归并至 [[方法-GTSAM-Ceres工程因子]]。
 
 # GNSS 位置残差因子
 

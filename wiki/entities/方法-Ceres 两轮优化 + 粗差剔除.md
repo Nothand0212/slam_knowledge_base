@@ -2,10 +2,13 @@
 type: entity
 tags: [Ceres, 优化策略, 粗差剔除, 鲁棒核]
 created: 2026-04-29
-updated: 2026-04-29
+updated: 2026-05-15
 sources:
   - wiki/sources/2026-04-28-ic_gvins-analysis.md
+superseded-by: [[方法-鲁棒估计方法族]]
 ---
+
+> 本页内容已归并至 [[方法-鲁棒估计方法族]]。
 
 # Ceres 两轮优化 + 粗差剔除
 

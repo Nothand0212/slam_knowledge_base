@@ -2,10 +2,12 @@
 type: entity
 tags: [ICP, 连续时间, 运动畸变, 因子图]
 created: 2026-04-29
-updated: 2026-04-29
+updated: 2026-05-15
+superseded-by: [[方法-ICP变体族]]
 sources:
   - wiki/sources/2026-04-28-gtsam_points-analysis.md
 ---
+> 本页内容已归并至 [[方法-ICP变体族]]。
 
 # 连续时间 ICP 因子
 

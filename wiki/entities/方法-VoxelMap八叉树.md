@@ -3,9 +3,12 @@ tags: [LiDAR, 地图表示, 八叉树, VoxelMap, FAST-LIVO2]
 sources:
   - wiki/sources/2026-04-29-fast_livo2_analysis.md
 created: 2026-04-29
+updated: 2026-05-15
+superseded-by: [[方法-LiDAR地图表示]]
 type: entity
-updated: 2026-04-29
 ---
+
+> 本页内容已归并至 [[方法-LiDAR地图表示]]。
 
 # VoxelMap八叉树
 

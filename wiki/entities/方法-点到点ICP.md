@@ -4,8 +4,10 @@ sources:
   - wiki/sources/2026-04-29-kiss_icp_analysis.md
 created: 2026-04-29
 type: entity
-updated: 2026-04-29
+updated: 2026-05-15
+superseded-by: [[方法-ICP变体族]]
 ---
+> 本页内容已归并至 [[方法-ICP变体族]]。
 
 # 点到点ICP
 

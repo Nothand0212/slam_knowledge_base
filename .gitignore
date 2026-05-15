@@ -6,3 +6,9 @@
 .dolt/
 *.db
 .beads-credential-key
+
+# SQLite WAL files
+brain.db-*
+
+# Understand codebase graph
+.understand-anything/

@@ -2,10 +2,13 @@
 type: entity
 tags: [GTSAM, 因子设计, 扫描配准, 设计模式]
 created: 2026-04-29
-updated: 2026-04-29
+updated: 2026-05-15
+superseded-by: [[方法-GTSAM-Ceres工程因子]]
 sources:
   - wiki/sources/2026-04-28-gtsam_points-analysis.md
 ---
+
+> 本页内容已归并至 [[方法-GTSAM-Ceres工程因子]]。
 
 # IntegratedMatchingCostFactor
 

@@ -235,6 +235,11 @@
       "hash": "sha256:5a90e4f75dcb73663beee027d0df75b03c963f9d07d83457ea25174c0fd72395",
       "ingested_at": "2026-04-30T06:07:47Z",
       "source_page": "wiki/sources/2026-04-30-image-preprocessing-comparison.md"
+    },
+    "raw/wechat/2026-05-02-p2v-slam/2026-05-02-p2v-slam.md": {
+      "hash": "sha256:01a69901bf4c4f3980fa2f8e44347424a8fbb8c1863a5c1b364f67871aaffac8",
+      "ingested_at": "2026-05-01T16:49:12Z",
+      "source_page": "wiki/sources/2026-05-02-p2v-slam.md"
     }
   }
 }

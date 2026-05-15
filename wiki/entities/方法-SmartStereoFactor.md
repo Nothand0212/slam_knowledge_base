@@ -2,10 +2,14 @@
 tags: [方法, SLAM]
 type: entity
 created: 2026-04-29
-updated: 2026-04-30
+updated: 2026-05-15
+superseded-by: [[方法-GTSAM-Ceres工程因子]]
 sources:
   - wiki/sources/2026-04-29-kimera_vio-analysis.md
 ---
+
+> 本页内容已归并至 [[方法-GTSAM-Ceres工程因子]]。
+
 # SmartStereoFactor
 
 > GTSAM smart factor 在双目 VIO 中的应用：内部三角化并消去路标，只把多帧双目观测转化为位姿约束。

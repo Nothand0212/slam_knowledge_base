@@ -6,8 +6,10 @@ sources:
   - wiki/sources/2026-04-29-lidar-pipeline-comparison.md
 created: 2026-04-28
 type: entity
-updated: 2026-04-29
+updated: 2026-05-15
+superseded-by: [[方法-ICP变体族]]
 ---
+> 本页内容已归并至 [[方法-ICP变体族]]。
 
 # genz-icp
 

@@ -3,9 +3,12 @@ tags: [LiDAR, ICP, 体素地图]
 sources:
   - wiki/sources/2026-04-29-kiss_icp_analysis.md
 created: 2026-04-29
+updated: 2026-05-15
+superseded-by: [[方法-LiDAR地图表示]]
 type: entity
-updated: 2026-04-30
 ---
+
+> 本页内容已归并至 [[方法-LiDAR地图表示]]。
 
 # VoxelHashMap
 

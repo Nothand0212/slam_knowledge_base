@@ -2,10 +2,12 @@
 type: entity
 tags: [GICP, SO(3), 旋转优化, 流形, 体素化]
 created: 2026-04-29
-updated: 2026-04-29
+updated: 2026-05-15
+superseded-by: [[方法-ICP变体族]]
 sources:
   - wiki/sources/2026-04-28-rolo-analysis.md
 ---
+> 本页内容已归并至 [[方法-ICP变体族]]。
 
 # RotVGICP
 

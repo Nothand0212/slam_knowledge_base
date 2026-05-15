@@ -6,7 +6,7 @@ sources:
   - wiki/sources/2026-04-29-imu-pipeline-comparison.md
   - wiki/sources/2026-04-28-phad-fusion-design.md
 created: 2026-04-29
-updated: 2026-04-29
+updated: 2026-05-15
 type: entity
 ---
 
@@ -49,4 +49,78 @@ b_prior = b_r  - H_rm H_mm^{-1} b_m
 - [[架构-滑动窗口优化]], [[组件-GTSAM]]
 - [[数学-流形优化]], [[概念-因子图]]
 - [[概念-MSCKF]], [[组件-Ceres-Solver]]
-- [[方法-SmartStereoFactor]]
+- [[方法-SmartStereoFactor]] [[方法-滑动窗口边缘化]] [[方法-关键帧选择策略]] [[方法-ISAM2增量固定滞后平滑]]
+
+## VINS-Fusion 源码实现
+
+**源码锚点**: `raw/codes/VINS-Fusion/vins_estimator/src/factor/marginalization_factor.cpp:L183-L311`
+
+### Schur 补边缘化核心
+
+```
+marginalize():
+    // 1. 参数块编排：被边缘化的变量在前（索引 0..m-1），保留的在后（索引 m..m+n-1）
+    m = sum(dim_of_dropped_blocks)   // 被边缘化变量总维度
+    n = sum(dim_of_kept_blocks)      // 保留变量总维度
+
+    // 2. 多线程构建 H 和 b（所有残差因子 Evaluate 后）
+    A = zero_matrix(m+n, m+n);  b = zero_vector(m+n)
+    for each residual block (4-thread parallel):
+        J_i = leftCols(localSize) of jacobian_i
+        A.block(idx_i, idx_j) += J_i^T * J_j
+        b.segment(idx_i)     += J_i^T * residual
+
+    // 3. Schur 补
+    Amm = 0.5 * (A(0:m, 0:m) + A(0:m, 0:m)^T)  // 对称化
+    Amm_inv = V * diag(1/eig if eig>eps else 0) * V^T  // 正则化逆
+
+    A_reduced = A(m:, m:) - A(m:, 0:m) * Amm_inv * A(0:m, m:)
+    b_reduced = b(m:)     - A(m:, 0:m) * Amm_inv * b(0:m)
+
+    // 4. 分解为线性 Jacobian + 残差（便于后续作为 Ceres CostFunction）
+    eigendecompose(A_reduced) → V_eig * S * V_eig^T
+    linearized_jacobians = sqrt(S) * V_eig^T
+    linearized_residuals = 1/sqrt(S) * V_eig^T * b_reduced
+```
+
+**关键行号**: `marginalization_factor.cpp:L281-L306`（Schur 补 + 特征分解）
+
+### SE(3) 位姿的切空间处理
+
+位姿在优化中用 7 维表示（平移 + 四元数），但 Schur 补在线性化后的**切空间（6 维李代数）**上运算：
+
+```
+localSize(7) = 6     // 从 7 维参数块映射到 6 维切空间
+globalSize(6) = 7    // 反向映射
+
+Jacobian 截取: jacobian_i.leftCols(6)  // 只取切空间分量
+```
+
+### 先验因子接入优化
+
+边缘化后产生的 `MarginalizationFactor` 在下一轮 Ceres 优化中作为 CostFunction：
+
+```
+Evaluate(parameters, residuals, jacobians):
+    dx = current_params ⊖ linearization_point  // 流形上的差
+    residuals = linearized_residuals + linearized_jacobians * dx
+    jacobians = linearized_jacobians
+```
+
+先验因子**不允许重新线性化**，保证了 first-estimate Jacobian (FEJ) 一致性。
+
+### KF 与边缘化策略联动
+
+```
+addFeatureCheckParallax() → KF = true
+    → marginalization_flag = MARGIN_OLD
+    → 边缘化最老帧（Pose[0], SpeedBias[0]）
+    → 将其 IMU/视觉/先验约束通过 Schur 补压缩
+
+addFeatureCheckParallax() → KF = false
+    → marginalization_flag = MARGIN_SECOND_NEW
+    → 丢弃次新帧视觉观测，只合并 IMU 预积分
+    → 不执行 Schur 补（避免引入不必要的先验）
+```
+
+**源码锚点**: `raw/codes/VINS-Fusion/vins_estimator/src/estimator/estimator.cpp:L411-L427`

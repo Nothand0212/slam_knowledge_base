@@ -2,11 +2,13 @@
 tags: [组件, 点云配准, SLAM]
 type: entity
 created: 2026-04-29
-updated: 2026-04-29
+updated: 2026-05-15
+superseded-by: [[方法-ICP变体族]]
 sources:
   - wiki/sources/2026-04-29-fast_lio_sam-analysis.md
   - wiki/sources/2026-04-29-external-primary-source-check.md
 ---
+> 本页内容已归并至 [[方法-ICP变体族]]。
 
 # Nano-GICP
 
