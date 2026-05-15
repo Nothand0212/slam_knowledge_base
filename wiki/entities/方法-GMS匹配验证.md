@@ -4,13 +4,16 @@ sources:
   - wiki/sources/2026-04-29-bev_lslam_analysis.md
   - wiki/sources/2026-04-29-external-primary-source-check.md
 created: 2026-04-29
+updated: 2026-05-15
+superseded-by: [[方法-视觉特征跟踪]]
 type: entity
-updated: 2026-04-30
 ---
 
 # GMS匹配验证
 
 > Grid-based Motion Statistics：一种快速几何验证方法，利用运动平滑性假设滤除外点。
+
+> **⚠ 本页面内容已合并至 [[方法-视觉特征跟踪]]，保留此页仅供历史引用。请以主页面为准。**
 
 ## 核心原理
 

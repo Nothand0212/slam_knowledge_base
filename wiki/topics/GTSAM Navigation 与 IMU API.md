@@ -1,10 +1,13 @@
 ---
 tags: [GTSAM, navigation, IMU, GPS, VIO]
 created: 2026-04-27
-updated: 2026-04-27
+updated: 2026-05-15
+superseded-by: [[方法-GTSAM-API族]]
 sources:
   - wiki/sources/2026-04-27-gtsam-4.3a1-docs.md
 ---
+
+> 本页内容已归并至 [[方法-GTSAM-API族]]。
 
 # GTSAM Navigation 与 IMU API
 

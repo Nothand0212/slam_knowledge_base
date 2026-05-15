@@ -7,8 +7,10 @@ sources:
   - wiki/sources/2026-04-29-orb-slam3-analysis.md
   - wiki/sources/2026-04-29-paper-notes.md
 created: 2026-04-29
-updated: 2026-04-29
+updated: 2026-05-15
 type: entity
+superseded-by: 方法-直接法SLAM族
+retention: 保留作为历史版本，内容已合并至 [[方法-直接法SLAM族]]。
 ---
 
 # 直接法vs间接法

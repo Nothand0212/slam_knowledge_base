@@ -5,13 +5,16 @@ sources:
   - wiki/sources/2026-04-29-vins-fusion-analysis-analysis.md
   - wiki/sources/2026-04-29-external-primary-source-check.md
 created: 2026-04-29
+updated: 2026-05-15
+superseded-by: [[方法-视觉特征跟踪]]
 type: entity
-updated: 2026-04-30
 ---
 
 # Shi-Tomasi角点
 
 > VINS-Mono 视觉前端特征提取算法：通过 `cv::goodFeaturesToTrack()` 提取 150 个 Shi-Tomasi 角点，通过 KLT 光流金字塔跟踪。
+
+> **⚠ 本页面内容已合并至 [[方法-视觉特征跟踪]]，保留此页仅供历史引用。请以主页面为准。**
 
 ## 判定原理
 
