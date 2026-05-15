@@ -525,11 +525,14 @@ ORB-SLAM3 的回环检测模块（`LoopClosing`）不仅检测同一地图的回
 
 **包含关键帧**：
 - 当前 KF `pKF`
-- `pKF` 的所有共视 KF（covisible，通过 `GetBestCovisibilityKeyFrames(num)` 获取）
+- `pKF` 的所有共视 KF（covisible，标准 Local BA 通过
+  `GetVectorCovisibleKeyFrames()` 获取；共视边由默认至少 15 个共享
+  MapPoint 建立，没有 best-N 截断）
 - 以上 KF 观测到的所有地图点
 
 **固定关键帧**（不被优化）：
-- 其他能观测到这些地图点但不属于共视 KF 的关键帧
+- 其他能观测到这些地图点但不属于 local KF 集合的关键帧；标准 Local BA
+  通过遍历 local MapPoint 的 observations 得出，不按 top-N 排序截断
 
 **优化变量**：
 - 未被固定的 KF 6DoF 位姿
@@ -540,6 +543,8 @@ ORB-SLAM3 的回环检测模块（`LoopClosing`）不仅检测同一地图的回
 - `LinearSolverEigen`：线性求解器
 - `OptimizationAlgorithmLevenberg`：**Levenberg-Marquardt 算法**
 - 鲁棒核：Huber Kernel，mono delta sqrt(5.99), stereo delta sqrt(7.815)
+- 标准 Local BA 是单 pass LM 优化，优化后擦除 outlier observations；LoopClosing
+  map merge 的 welding LBA 才使用两阶段 outlier rejection 后再优化的模式
 - 信息矩阵：按金字塔层级缩放 `invSigma2 = 1.0 / sigma2_level`
 
 **残差**：

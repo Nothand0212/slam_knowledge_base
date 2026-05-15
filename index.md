@@ -8,7 +8,7 @@
 
 - 主题：ROS 机器人导航与 SLAM 知识库
 - 素材总数：79
-- Wiki 页面总数：305
+- Wiki 页面总数：316
 
 ---
 
@@ -176,6 +176,14 @@
 - [[方法-直接法LiDAR-视觉融合]]
 - [[方法-神经点云SLAM]]
 - [[方法-事件相机前端管线]]
+- [[方法-KISS-ICP简易ICP]]
+- [[方法-LeGO-LOAM地面优化]]
+- [[方法-LVI-SAM互补架构]]
+- [[方法-MSCKF-VIO实现]]
+- [[方法-ROLO-SLAM旋转解耦]]
+- [[方法-ROVIO-EKF-VIO]]
+- [[方法-SchurVINS-Schur补VIO]]
+- [[方法-多传感器冗余切换]]
 - [[方法-点到点ICP]]
 
 - [[方法-点基隐式神经表示]]
@@ -384,6 +392,9 @@
 - [[2026-04-28-bev_lslam-analysis]] - BEV-LSLAM BEV 投影 + ORB + DBoW3 回环
 - [[2026-04-28-slam_fusion_core-analysis]] - slam_fusion_core 核心库缺陷分析
 
+- [[LiDAR-SLAM路线图对比]]
+- [[VIO方案全景对比]]
+- [[优化后端选型指南]]
 ### 设计文档
 - [[2026-04-28-phad-fusion-design]] - phad_fusion 多模态因子图 SLAM 架构设计（SOTA 目标）
 
