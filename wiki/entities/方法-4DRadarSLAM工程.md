@@ -3,7 +3,8 @@ tags: [4D雷达, SLAM, 多传感器, 回环检测, ISC, Doppler速度]
 type: entity
 created: 2026-05-15
 updated: 2026-05-15
-sources: []
+sources:
+  - raw/codes/4DRadarSLAM
 ---
 
 # 4DRadarSLAM 工程

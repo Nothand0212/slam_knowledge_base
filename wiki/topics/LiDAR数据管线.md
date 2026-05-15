@@ -53,6 +53,8 @@ KD-Tree      iKD-Tree/IVox3d/八叉树 → 隐式点-体素观测(P2V-SLAM)
 - 隐式点-体素观测：P2V-SLAM（VE-Net 编码体素特征，IR-Net 输出残差与不确定度）
 
 ## 相关页面
+- [[方法-LiDAR-IMU-视觉融合]]
+- [[方法-直接法LiDAR-视觉融合]]
 
 - [[LiDAR方案对比]]
 - [[算法-KISS-ICP]]

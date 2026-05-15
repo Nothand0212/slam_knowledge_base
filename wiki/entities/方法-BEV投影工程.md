@@ -3,7 +3,8 @@ tags: [BEV, 投影, 地面分割, LiDAR, BEV-LSLAM, 回环检测, 地点识别, 
 type: entity
 created: 2026-05-15
 updated: 2026-05-15
-sources: []
+sources:
+  - raw/codes/BEV-LSLAM
 ---
 
 # BEV 投影工程

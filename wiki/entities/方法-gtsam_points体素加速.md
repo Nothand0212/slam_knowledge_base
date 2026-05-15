@@ -183,7 +183,7 @@ $$r_i = R_{BA} p_i^A + t_{BA} - \mu_j$$
 
 $$e_i = r_i^T \left(C_j + R_{BA} C_i^A R_{BA}^T \right)^{-1} r_i$$
 
-其中 $\left(C_j + R_{BA} C_i^A R_{BA}^T \right)^{-1}$ 缓存为 `mahalanobis_full[i]`，每次 `update_correspondences()` 重新计算。GICP 系因子的雅可比结构与 [[方法-gtsam_points因子封装模式#通用残差与雅可比模式]] 中完全相同，仅使用不同的马氏矩阵。
+其中 $\left(C_j + R_{BA} C_i^A R_{BA}^T \right)^{-1}$ 缓存为 `mahalanobis_full[i]`，每次 `update_correspondences()` 重新计算。GICP 系因子的雅可比结构与 [[方法-gtsam_points因子封装模式]] 中完全相同，仅使用不同的马氏矩阵。
 
 ## 体素重叠率检测
 
@@ -313,7 +313,7 @@ function voxel_correspondence(source_pt, delta, gvm):
 - [[方法-gtsam_points因子封装模式]]
 - [[方法-gtsam_points连续时间因子]]
 - [[方法-GaussianVoxelMap 体素化配准]]
-- [[方法-VGICP 体素化 GICP]]
+- [[方法-ICP变体族|VGICP]]
 - [[方法-体素地图]]
 - [[方法-RotVGICP]]
 - [[方法-Fast-VGICP]]

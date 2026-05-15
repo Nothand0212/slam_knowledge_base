@@ -32,6 +32,7 @@ type: entity
 深度学习 SLAM 页面应和传统 SLAM 页面互相连接：Dense BA 对应 [[概念-Schur补与边缘化]]，可微渲染对应 [[概念-可微渲染]]，3DGS 对应 [[方法-3D Gaussian Splatting]]，隐式地图对应 [[方法-SDF解码器]] 和 [[方法-点基隐式神经表示]]。这样能避免把神经方法孤立成论文清单，而是放回 SLAM 的状态估计和地图表示框架里理解。
 
 ## 相关页面
+- [[方法-RAFT光流SLAM]]
 - [[算法-DROID-SLAM]], [[算法-NICE-SLAM]], [[算法-MonoGS]], [[算法-PIN-SLAM]]
 - [[方法-RAFT光流]], [[方法-Dense BA]]
 - [[概念-可微渲染]], [[方法-3D Gaussian Splatting]]

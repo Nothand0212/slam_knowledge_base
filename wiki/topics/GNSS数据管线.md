@@ -47,6 +47,7 @@ ic_gvins/ob_gins 的两阶段粗差剔除：
 - fusions_slam：退化为纯 LiDAR-IMU
 
 ## 相关页面
+- [[方法-滑动窗口GNSS优化]]
 
 - [[算法-IC-GVINS]]
 - [[算法-OB_GINS]]
