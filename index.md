@@ -1,14 +1,14 @@
 # 知识库索引
 
-> 最后更新：2026-05-15
+> 最后更新：2026-05-16
 
 ---
 
 ## 概览
 
 - 主题：ROS 机器人导航与 SLAM 知识库
-- 素材总数：79
-- Wiki 页面总数：316
+- 素材总数：94
+- Wiki 页面总数：326
 
 ---
 
@@ -266,6 +266,16 @@
 ---
 
 ## 素材摘要
+- [[2026-05-15-nice-slam]] - NICE-SLAM CVPR 2022 论文精读：层次化神经隐式场景表示，可微体积渲染驱动跟踪
+- [[2026-05-15-3d-gaussian-splatting]] - 3D Gaussian Splatting SIGGRAPH 2023 论文精读：显式 Gaussian 椭球 + tile-based 光栅化
+- [[2026-05-15-droid-slam]] - DROID-SLAM NeurIPS 2021 论文精读：迭代光流 + Dense BA 层 + GPU Schur 补消元
+- [[2026-05-15-dm-vio]] - DM-VIO RA-L/IROS 2022 论文精读：延迟边缘化策略，DSO+GTSAM 统一优化
+- [[2026-05-15-orb-slam]] - ORB-SLAM TRO 2015 论文精读：首个全 ORB 特征三线程 SLAM 系统
+- [[2026-05-15-orb-slam2]] - ORB-SLAM2 TRO 2017 论文精读：立体/RGB-D 扩展 + 地图复用 + 定位模式
+- [[2026-05-15-orb-slam3]] - ORB-SLAM3 TRO 2021 论文精读：MAP VI 初始化 + Atlas 多地图 + 鱼眼支持
+- [[2026-05-15-isam2]] - iSAM2 IJRR 2012 论文精读：Bayes Tree 增量平滑与建图
+- [[2026-05-15-factor-graphs-dellaert]] - Factor Graphs for Robot Perception FnT 2017 专著精读：因子图 SLAM 统一教程
+- [[2026-05-15-vins-mono]] - VINS-Mono TRO 2018 论文精读：滑动窗口紧耦合 VIO + 回环 + 在线外参标定
 - [[2026-05-02-p2v-slam]] - P2V-SLAM 隐式点-体素 LiDAR-IMU SLAM
 - [[2026-04-30-image-preprocessing-comparison]] - 图像预处理源码调查与影响分析
 - [[2026-04-29-external-primary-source-check]] - 外部一手资料核验：官方文档、官方仓库、作者论文交叉验证
@@ -331,6 +341,10 @@
 - [[2026-04-29-msckf-vio-analysis-analysis|2026-04-29-msckf_vio-analysis]] - MSCKF_VIO OC-MSCKF 可观测性约束 + SPQR QR 压缩分析
 - [[2026-04-29-schurvins-analysis-analysis|2026-04-29-schurvins-analysis]] - SchurVINS Schur Complement 边缘化 + robotcentric 路标分析
 - [[2026-04-29-openmavis-analysis-analysis|2026-04-29-openmavis-analysis]] - OpenMAVIS SE2(3) 精确预积分 + cam_idx 多相机投影框架
+- [[2026-05-15-orb-slam]] - ORB-SLAM TRO 2015 论文：三线程架构、共视图、Essential Graph
+- [[2026-05-15-orb-slam2]] - ORB-SLAM2 TRO 2017 论文：立体/RGB-D 扩展、地图复用
+- [[2026-05-15-orb-slam3]] - ORB-SLAM3 TRO 2021 论文：紧耦合 VI-MAP、Atlas 多地图
+- [[2026-05-15-vins-mono]] - VINS-Mono TRO 2018 论文：滑动窗口 VIO + 回环 + 在线标定
 
 ### 直接法与半直接法
 - [[2026-04-28-dso-analysis]] - DSO (2444★) 稀疏直接法 VO，滑动窗口光度 BA，无 IMU 纯视觉
@@ -400,6 +414,10 @@
 
 ### 早期素材
 - [[2026-04-27-gtsam-4.3a1-docs]] - GTSAM 4.3a1 官方文档整理入口
+
+### 基础理论与教材
+- [[2026-05-15-isam2]] - iSAM2 IJRR 2012 论文：Bayes Tree 增量平滑与建图
+- [[2026-05-15-factor-graphs-dellaert]] - Factor Graphs for Robot Perception FnT 2017 专著：因子图 SLAM 统一教材
 
 ---
 

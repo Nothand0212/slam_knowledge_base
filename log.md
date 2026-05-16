@@ -4,6 +4,17 @@
 
 ---
 
+## 2026-05-15 ingest | 4 篇神经 SLAM 论文精读
+
+- **素材来源**：arXiv 论文 PDF（NICE-SLAM / 3DGS / DROID-SLAM / DM-VIO）
+- **新增素材摘要**：4 篇
+  - [[2026-05-15-nice-slam]] — NICE-SLAM 层次化隐式表示 + 可微渲染 tracking
+  - [[2026-05-15-3d-gaussian-splatting]] — 3DGS 显式 Gaussian 场景表示 + tile-based 光栅化
+  - [[2026-05-15-droid-slam]] — DROID-SLAM 迭代光流 + Dense BA + GPU Schur
+  - [[2026-05-15-dm-vio]] — DM-VIO 延迟边缘化 + DSO/GTSAM 统一优化
+- **更新页面**：[[素材索引]] (83 entries)、index.md、log.md
+- **交叉引用**：每篇源页与已有实体页（算法-/概念-/方法-）建立双向 wikilink，补充 Agent 实现提示
+
 ## 2026-05-15 maintenance | 分批归并：4 主题簇 + lint 全量通过
 
 - **归并页面**：
