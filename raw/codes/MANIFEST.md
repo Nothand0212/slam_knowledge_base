@@ -42,6 +42,7 @@
 | fusions_slam | master | `e362c6458db383ae7ebf708c5575d508ce1f8ce3` | `https://github.com/LiangHongY/fusions_slam.git` | false | - |
 | genz-icp | master | `d3ca3c4897d7e1df611bc60c0c8f1a19ecd593a9` | `https://github.com/cocel-postech/genz-icp.git` | false | - |
 | gtsam | develop | `fc790b0916a81a56077fc197ad8259d5efa63972` | `https://github.com/borglab/gtsam.git` | false | - |
+| gtsam_points | v1.2.1 | (unknown, .git removed before tracking) | `https://github.com/koide3/gtsam_points.git` | false | - |
 | kiss-icp | main | `b16835283aee62f7d5e2bdf6c1c3bb2930de74ff` | `https://github.com/PRBonn/kiss-icp.git` | false | - |
 | lightning-lm | master | `7062399a93a6844230f9fd5ad6f4d72ab45f5938` | `https://github.com/gaoxiang12/lightning-lm.git` | false | - |
 | lt-mapper | main | `80b67567b356850a10e883c1530e4e69314eaa62` | `https://github.com/gisbi-kim/lt-mapper.git` | false | - |

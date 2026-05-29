@@ -93,6 +93,62 @@ GTSAM_BRANCH = "develop"
 GTSAM_REMOTE = "https://github.com/borglab/gtsam.git"
 GTSAM_DOXYGEN_URL = "https://gtsam.org/doxygen/"
 
+# gtsam_points source info
+GTSAM_POINTS_SOURCE = "raw/codes/gtsam_points"
+GTSAM_POINTS_VERSION = "v1.2.1"
+GTSAM_POINTS_REMOTE = "https://github.com/koide3/gtsam_points.git"
+GTSAM_POINTS_DOXYGEN_URL = "https://koide3.github.io/gtsam_points/doc_cpp/index.html"
+
+# gtsam_points target classes
+TARGET_CLASSES_GTSAM_POINTS = {
+    "Scan Matching Factors": [
+        ("IntegratedMatchingCostFactor", "classgtsam__points_1_1IntegratedMatchingCostFactor"),
+        ("IntegratedICPFactor_", "classgtsam__points_1_1IntegratedICPFactor__"),
+        ("IntegratedPointToPlaneICPFactor_", "classgtsam__points_1_1IntegratedPointToPlaneICPFactor__"),
+        ("IntegratedGICPFactor_", "classgtsam__points_1_1IntegratedGICPFactor__"),
+        ("IntegratedVGICPFactor_", "classgtsam__points_1_1IntegratedVGICPFactor__"),
+        ("IntegratedVGICPFactorGPU", "classgtsam__points_1_1IntegratedVGICPFactorGPU"),
+        ("IntegratedLOAMFactor_", "classgtsam__points_1_1IntegratedLOAMFactor__"),
+        ("IntegratedPointToPlaneFactor_", "classgtsam__points_1_1IntegratedPointToPlaneFactor__"),
+    ],
+    "Colored & Continuous Factors": [
+        ("IntegratedColorConsistencyFactor_", "classgtsam__points_1_1IntegratedColorConsistencyFactor__"),
+        ("IntegratedColoredGICPFactor_", "classgtsam__points_1_1IntegratedColoredGICPFactor__"),
+        ("IntegratedCT_ICPFactor_", "classgtsam__points_1_1IntegratedCT__ICPFactor__"),
+        ("IntegratedCT_GICPFactor_", "classgtsam__points_1_1IntegratedCT__GICPFactor__"),
+    ],
+    "Bundle Adjustment": [
+        ("BundleAdjustmentFactorBase", "classgtsam__points_1_1BundleAdjustmentFactorBase"),
+        ("EVMBundleAdjustmentFactorBase", "classgtsam__points_1_1EVMBundleAdjustmentFactorBase"),
+        ("EdgeEVMFactor", "classgtsam__points_1_1EdgeEVMFactor"),
+        ("PlaneEVMFactor", "classgtsam__points_1_1PlaneEVMFactor"),
+        ("LsqBundleAdjustmentFactor", "classgtsam__points_1_1LsqBundleAdjustmentFactor"),
+        ("LinearDampingFactor", "classgtsam__points_1_1LinearDampingFactor"),
+    ],
+    "Nearest Neighbor": [
+        ("KdTree", "structgtsam__points_1_1KdTree"),
+        ("KdTreeX", "structgtsam__points_1_1KdTreeX"),
+        ("IncrementalVoxelMap", "structgtsam__points_1_1IncrementalVoxelMap"),
+        ("IncrementalCovarianceVoxelMap", "structgtsam__points_1_1IncrementalCovarianceVoxelMap"),
+        ("FastOccupancyGrid", "classgtsam__points_1_1FastOccupancyGrid"),
+        ("GaussianVoxelMap", "classgtsam__points_1_1GaussianVoxelMap"),
+        ("GaussianVoxelMapCPU", "classgtsam__points_1_1GaussianVoxelMapCPU"),
+    ],
+    "Point Cloud & Trajectory": [
+        ("PointCloud", "structgtsam__points_1_1PointCloud"),
+        ("PointCloudCPU", "structgtsam__points_1_1PointCloudCPU"),
+        ("ContinuousTrajectory", "classgtsam__points_1_1ContinuousTrajectory"),
+        ("RegistrationResult", "structgtsam__points_1_1RegistrationResult"),
+        ("Pose3InterpolationFactor", "classgtsam__points_1_1Pose3InterpolationFactor"),
+    ],
+    "CUDA": [
+        ("NonlinearFactorSetGPU", "classgtsam__points_1_1NonlinearFactorSetGPU"),
+        ("NonlinearFactorGPU", "classgtsam__points_1_1NonlinearFactorGPU"),
+        ("CUDABuffer", "classgtsam__points_1_1CUDABuffer"),
+        ("CUDAGraphExec", "classgtsam__points_1_1CUDAGraphExec"),
+    ],
+}
+
 
 # ============================================================
 # XML Parsing
@@ -296,30 +352,43 @@ def build_signature(member):
 # Wiki Page Generation
 # ============================================================
 
-def generate_wiki_page(data, category):
+def generate_wiki_page(data, category, project="gtsam"):
     """Generate a markdown wiki page from parsed class data."""
     name = data['short_name']
     kind = data['kind']
     kind_cn = '类' if kind == 'class' else '结构体'
     header_file = data['header'] or f"gtsam/{category.lower()}/{name}.h"
 
+    if project == "gtsam_points":
+        source_info = f"`{GTSAM_POINTS_SOURCE}` ({GTSAM_POINTS_VERSION})"
+        remote_info = GTSAM_POINTS_REMOTE
+        doc_url = GTSAM_POINTS_DOXYGEN_URL
+        index_page = "GTSAM C++ API 参考索引"
+        api_family = "方法-gtsam_points因子封装模式"
+    else:
+        source_info = f"`{GTSAM_SOURCE}` ({GTSAM_BRANCH})"
+        remote_info = GTSAM_REMOTE
+        doc_url = GTSAM_DOXYGEN_URL
+        index_page = "GTSAM C++ API 参考索引"
+        api_family = "方法-GTSAM-API族"
+
     lines = []
     # Frontmatter
     lines.append('---')
     lines.append(f'type: entity')
-    lines.append(f'tags: [GTSAM, C++ API, {category}, {name}]')
+    tag_proj = "gtsam_points" if project == "gtsam_points" else "GTSAM"
+    lines.append(f'tags: [{tag_proj}, C++ API, {category}, {name}]')
     lines.append(f'created: {TODAY}')
     lines.append(f'updated: {TODAY}')
     lines.append('sources:')
-    lines.append(f'  - {GTSAM_DOXYGEN_URL}')
-    lines.append(f'  - {GTSAM_SOURCE}')
+    lines.append(f'  - {doc_url}')
+    lines.append(f'  - {source_info.split("(")[0].strip().strip("`")}')
     lines.append('---')
     lines.append('')
-    lines.append(f'# GTSAM::{name}')
+    proj_name_disp = "gtsam_points" if project == "gtsam_points" else "GTSAM"
+    lines.append(f'# {proj_name_disp}::{name}')
     lines.append('')
-    # Build a reasonable online doc URL
-    name_flat = name.lower().replace('::', '_').replace('<', '_').replace('>', '_').replace(' ', '_')
-    lines.append(f'> **{kind_cn}** | 头文件: `{header_file}` | [在线文档]({GTSAM_DOXYGEN_URL})')
+    lines.append(f'> **{kind_cn}** | 头文件: `{header_file}` | [在线文档]({doc_url})')
     lines.append('')
 
     # Brief description
@@ -420,9 +489,8 @@ def generate_wiki_page(data, category):
     # Source info
     lines.append('## 源码位置')
     lines.append('')
-    lines.append(f'- 分支: `{GTSAM_BRANCH}`')
-    lines.append(f'- 远程: {GTSAM_REMOTE}')
-    lines.append(f'- 本地快照: `{GTSAM_SOURCE}`')
+    lines.append(f'- 远程: {remote_info}')
+    lines.append(f'- 本地快照: {source_info}')
     lines.append('')
 
     # Agent 实现提示 (minimal)
@@ -445,35 +513,51 @@ def generate_wiki_page(data, category):
     # Related pages
     lines.append('## 相关页面')
     lines.append('')
-    lines.append(f'- [[方法-GTSAM-API族]]')
-    if category != 'Geometry':
-        lines.append(f'- [[GTSAM Geometry API]]')
-    lines.append(f'- [[GTSAM API 使用索引]]')
-    lines.append(f'- [[GTSAM 4.3a1 使用指南]]')
+    lines.append(f'- [[{api_family}]]')
+    lines.append(f'- [[{index_page}]]')
     lines.append('')
 
     return '\n'.join(lines)
 
 
-def generate_index_page(categories, output_dir):
-    """Generate an index page for all generated GTSAM C++ API pages."""
+def generate_index_page(categories, output_dir, project="gtsam"):
+    """Generate an index page for all generated API pages."""
+    if project == "gtsam_points":
+        proj_name = "gtsam_points"
+        proj_ver = GTSAM_POINTS_VERSION
+        doc_url = GTSAM_POINTS_DOXYGEN_URL
+        index_title = "gtsam_points C++ API 参考索引"
+        index_desc = "gtsam_points 源码"
+        api_family = "方法-gtsam_points因子封装模式"
+        tag_prefix = "gtsam_points"
+        src_prefix = "include/gtsam_points"
+    else:
+        proj_name = "GTSAM"
+        proj_ver = GTSAM_BRANCH
+        doc_url = GTSAM_DOXYGEN_URL
+        index_title = "GTSAM C++ API 参考索引"
+        index_desc = "GTSAM 源码"
+        api_family = "方法-GTSAM-API族"
+        tag_prefix = "GTSAM"
+        src_prefix = "gtsam"
+
     lines = []
     lines.append('---')
     lines.append(f'type: entity')
-    lines.append(f'tags: [GTSAM, C++ API, index]')
+    lines.append(f'tags: [{tag_prefix}, C++ API, index]')
     lines.append(f'created: {TODAY}')
     lines.append(f'updated: {TODAY}')
     lines.append('sources:')
-    lines.append(f'  - {GTSAM_DOXYGEN_URL}')
+    lines.append(f'  - {doc_url}')
     lines.append('---')
     lines.append('')
-    lines.append('# GTSAM C++ API 参考索引')
+    lines.append(f'# {index_title}')
     lines.append('')
-    lines.append(f'> 自动生成自 Doxygen XML | GTSAM `{GTSAM_BRANCH}` 分支 | {TODAY}')
+    lines.append(f'> 自动生成自 Doxygen XML | {proj_name} `{proj_ver}` | {TODAY}')
     lines.append('')
-    lines.append(f'本文档是从 GTSAM 源码通过 Doxygen 生成的 C++ API 参考。包含 {sum(len(v) for v in categories.values())} 个核心类的构造函数、方法签名和参数说明。')
+    lines.append(f'本文档是从 {index_desc} 通过 Doxygen 生成的 C++ API 参考。包含 {sum(len(v) for v in categories.values())} 个核心类的构造函数、方法签名和参数说明。')
     lines.append('')
-    lines.append(f'在线 C++ 文档: [{GTSAM_DOXYGEN_URL}]({GTSAM_DOXYGEN_URL})')
+    lines.append(f'在线 C++ 文档: [{doc_url}]({doc_url})')
     lines.append('')
 
     for cat, classes in categories.items():
@@ -483,14 +567,12 @@ def generate_index_page(categories, output_dir):
         lines.append('|----|------|--------|')
         for cls_name, refid in classes:
             safe_name = cls_name.replace('<', r'\<').replace('>', r'\>')
-            lines.append(f'| [[C++ API - {cls_name}]] | class | gtsam/{cat.lower()}/{cls_name}.h |')
+            lines.append(f'| [[C++ API - {cls_name}]] | class | {src_prefix}/{cls_name}.h |')
         lines.append('')
 
     lines.append('## 相关页面')
     lines.append('')
-    lines.append(f'- [[方法-GTSAM-API族]]')
-    lines.append(f'- [[GTSAM API 使用索引]]')
-    lines.append(f'- [[GTSAM 4.3a1 使用指南]]')
+    lines.append(f'- [[{api_family}]]')
     lines.append('')
 
     return '\n'.join(lines)
@@ -502,11 +584,23 @@ def generate_index_page(categories, output_dir):
 
 def main():
     if len(sys.argv) < 3:
-        print(f"Usage: {sys.argv[0]} <doxygen_xml_dir> <wiki_output_dir>")
+        print(f"Usage: {sys.argv[0]} <doxygen_xml_dir> <wiki_output_dir> [--project gtsam|gtsam_points]")
         sys.exit(1)
 
     xml_dir = Path(sys.argv[1])
     wiki_dir = Path(sys.argv[2])
+
+    # Parse optional --project flag
+    project = "gtsam"
+    for i, arg in enumerate(sys.argv):
+        if arg == "--project" and i + 1 < len(sys.argv):
+            project = sys.argv[i + 1]
+            break
+
+    if project == "gtsam_points":
+        target_classes = TARGET_CLASSES_GTSAM_POINTS
+    else:
+        target_classes = TARGET_CLASSES
     wiki_dir.mkdir(parents=True, exist_ok=True)
 
     # Parse index.xml to get all class refids
@@ -533,7 +627,7 @@ def main():
 
     generated = {}
 
-    for category, classes in TARGET_CLASSES.items():
+    for category, classes in target_classes.items():
         generated[category] = []
         for cls_name, refid in classes:
             # Find the XML file
@@ -549,7 +643,7 @@ def main():
                 continue
 
             # Generate wiki page
-            page_content = generate_wiki_page(data, category)
+            page_content = generate_wiki_page(data, category, project=project)
             page_filename = f"C++ API - {cls_name}.md"
             page_path = wiki_dir / page_filename
             with open(page_path, 'w') as f:
@@ -561,8 +655,8 @@ def main():
 
     # Generate index page
     if generated:
-        index_content = generate_index_page(generated, wiki_dir)
-        index_path_out = wiki_dir / 'GTSAM C++ API 参考索引.md'
+        index_content = generate_index_page(generated, wiki_dir, project=project)
+        index_path_out = wiki_dir / f'{project} C++ API 参考索引.md'
         with open(index_path_out, 'w') as f:
             f.write(index_content)
         print(f"\nIndex page: {index_path_out}")

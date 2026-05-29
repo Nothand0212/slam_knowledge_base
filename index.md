@@ -264,6 +264,7 @@
 - [[GTSAM SLAM 与视觉因子 API]] - prior/between/projection/stereo/smart factors
 - [[GTSAM 自定义因子与 Jacobian]] - CustomFactor 与 Jacobian 约定
 - [[GTSAM C++ API 参考索引]] - 45 个核心类的 C++ API 参考（Doxygen 自动生成）
+- [[gtsam_points C++ API 参考索引]] - 34 个核心类的 C++ API 参考（Doxygen 自动生成）
 
 ### 传感器数据管线
 - [[素材索引]] - 当前 76 个素材摘要页的统一入口

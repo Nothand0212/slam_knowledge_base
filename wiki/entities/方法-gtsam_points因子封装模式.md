@@ -2,7 +2,7 @@
 tags: [gtsam_points, GTSAM, 因子图, scan matching, LiDAR, 点云配准, 因子封装]
 type: entity
 created: 2026-05-15
-updated: 2026-05-15
+updated: 2026-05-29
 sources:
   - wiki/sources/2026-04-28-gtsam_points-analysis.md
   - wiki/sources/2026-04-29-framework-comparison.md
@@ -295,3 +295,10 @@ class MyScanMatchingFactor : public IntegratedMatchingCostFactor:
 - [[方法-GTSAM-API族]]
 - [[组件-GTSAM]]
 - [[概念-因子图]]
+
+## C++ API 参考
+
+从 Doxygen XML 自动生成的 gtsam_points C++ API 参考：
+
+- [[gtsam_points C++ API 参考索引]] — 34 个核心类的分类导航
+- 每类独立页面（如 [[C++ API - IntegratedMatchingCostFactor]]、[[C++ API - IntegratedVGICPFactorGPU]]），含完整构造函数、方法签名、参数类型和 Doxygen 注释
