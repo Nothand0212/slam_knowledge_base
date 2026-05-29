@@ -1,14 +1,14 @@
 # 知识库索引
 
-> 最后更新：2026-05-16
+> 最后更新：2026-05-27
 
 ---
 
 ## 概览
 
 - 主题：ROS 机器人导航与 SLAM 知识库
-- 素材总数：94
-- Wiki 页面总数：326
+- 素材总数：95
+- Wiki 页面总数：343
 
 ---
 
@@ -36,6 +36,7 @@
 - [[算法-NICE-SLAM]]
 - [[算法-OB_GINS]]
 - [[算法-ORB-SLAM3]]
+- [[算法-OpenMAVIS]]
 - [[算法-OpenVINS]]
 - [[算法-P2V-SLAM]]
 - [[算法-PIN-SLAM]]
@@ -44,7 +45,11 @@
 - [[算法-ROVIO]]
 - [[算法-SVO-Pro]]
 - [[算法-SchurVINS]]
+- [[算法-SuperOdom]]
+- [[算法-VINS-Fusion]]
 - [[算法-fusions_slam]]
+- [[算法-genz-icp]]
+- [[算法-lightning-lm]]
 - [[算法-lt-mapper]]
 
 ### 跨算法理论与框架（概念-）
@@ -60,6 +65,7 @@
 - [[概念-可微渲染]]
 - [[概念-回环检测方法]]
 - [[概念-因子图]]
+- [[概念-折叠屏UI布局]]
 - [[概念-延迟边缘化]]
 - [[概念-基准测试数据集]]
 - [[概念-深度学习SLAM]]
@@ -98,6 +104,7 @@
 - [[方法-LiDAR 捆集调整因子]]
 - [[方法-Neural Point Map Context]]
 - [[方法-OnlineGravityAlignment]]
+- [[方法-TextArea多行文本]]
 - [[方法-POINT_TO_DISTRIBUTION]]
 - [[方法-Planar-Non-planar分类]]
 - [[方法-Quatro配准]]
@@ -240,6 +247,9 @@
 - [[架构-多传感器融合架构]]
 - [[架构-滑动窗口优化]]
 
+### 其他实体
+- [[2026-05-18-landmark-lifecycle]]
+
 ---
 
 ## 主题页
@@ -253,6 +263,7 @@
 - [[GTSAM Navigation 与 IMU API]] - NavState、IMU preintegration、GPS factors
 - [[GTSAM SLAM 与视觉因子 API]] - prior/between/projection/stereo/smart factors
 - [[GTSAM 自定义因子与 Jacobian]] - CustomFactor 与 Jacobian 约定
+- [[GTSAM C++ API 参考索引]] - 45 个核心类的 C++ API 参考（Doxygen 自动生成）
 
 ### 传感器数据管线
 - [[素材索引]] - 当前 76 个素材摘要页的统一入口
@@ -266,6 +277,7 @@
 ---
 
 ## 素材摘要
+- [[2026-05-18-harmonyos-arkts-pitfalls]] - HarmonyOS ArkTS 常见陷阱与工程实践整理
 - [[2026-05-15-nice-slam]] - NICE-SLAM CVPR 2022 论文精读：层次化神经隐式场景表示，可微体积渲染驱动跟踪
 - [[2026-05-15-3d-gaussian-splatting]] - 3D Gaussian Splatting SIGGRAPH 2023 论文精读：显式 Gaussian 椭球 + tile-based 光栅化
 - [[2026-05-15-droid-slam]] - DROID-SLAM NeurIPS 2021 论文精读：迭代光流 + Dense BA 层 + GPU Schur 补消元
@@ -276,6 +288,11 @@
 - [[2026-05-15-isam2]] - iSAM2 IJRR 2012 论文精读：Bayes Tree 增量平滑与建图
 - [[2026-05-15-factor-graphs-dellaert]] - Factor Graphs for Robot Perception FnT 2017 专著精读：因子图 SLAM 统一教程
 - [[2026-05-15-vins-mono]] - VINS-Mono TRO 2018 论文精读：滑动窗口紧耦合 VIO + 回环 + 在线外参标定
+- [[2026-05-15-fast-lio2]] - FAST-LIO2 论文精读：直接 LiDAR-IMU 里程计与地图增量更新
+- [[2026-05-15-imu-preintegration]] - IMU 预积分理论与实现要点整理
+- [[2026-05-15-loam]] - LOAM 论文精读：LiDAR 里程计与建图双线程框架
+- [[2026-05-15-msckf]] - MSCKF 经典视觉惯性滤波框架论文精读
+- [[2026-05-15-scancontext]] - Scan Context 回环检测方法论文精读
 - [[2026-05-02-p2v-slam]] - P2V-SLAM 隐式点-体素 LiDAR-IMU SLAM
 - [[2026-04-30-image-preprocessing-comparison]] - 图像预处理源码调查与影响分析
 - [[2026-04-29-external-primary-source-check]] - 外部一手资料核验：官方文档、官方仓库、作者论文交叉验证
@@ -435,5 +452,9 @@
 
 > 跨素材深度分析与设计方案
 
+- [[SLAM算法全景图谱]] - 35 个 SLAM/VIO/LIO/LVI/GNSS/雷达/建图/工具项目的高层算法家族树与子系统对比
+- [[从零搭多传感器融合系统]]
+- [[从零搭建LiDAR-SLAM系统]]
+- [[从零搭建VIO系统]]
 - [[phad_fusion设计总结]] - 设计理念 / 三模式切换 / 传感器抽象 / 因子类型 / 初始化策略 / 线程模型 / SOTA 目标
 - [[GTSAM 4.3a1 使用指南]] - 面向 ROS/SLAM 工程的 GTSAM 使用路线

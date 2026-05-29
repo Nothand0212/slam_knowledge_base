@@ -2,7 +2,7 @@
 type: entity
 tags: [GTSAM, API, 因子图, SLAM, 优化, 预积分, 视觉, Lie群, 自定义因子]
 created: 2026-05-15
-updated: 2026-05-15
+updated: 2026-05-29
 sources:
   - https://borglab.github.io/gtsam/
   - https://gtsam.org/doxygen/
@@ -566,6 +566,15 @@ def make_custom_factor(key0, key1, noise):
 - ISAM2 增量模式参考：[[方法-ISAM2增量固定滞后平滑]]
 - `raw/codes/gtsam_points/include/gtsam_points/factors/integrated_matching_cost_factor.hpp` — IMCF 基类 error/linearize 流水线
 - `raw/codes/Kimera-VIO/src/backend/RegularVioBackend.cpp:L478-L504` — addLandmarkToGraph (SmartStereoFactor)
+
+## C++ API 参考
+
+本知识库另含从 Doxygen XML 自动生成的详细 C++ API 参考，涵盖 45 个核心类：
+
+- [[GTSAM C++ API 参考索引]] — 全部 45 个类的分类导航
+- 每类独立页面（如 [[C++ API - Pose3]]、[[C++ API - ISAM2]]、[[C++ API - ImuFactorT]]），含完整构造函数、方法签名、参数类型和 Doxygen 注释
+
+适合需要精确 C++ 签名的编码场景，无需跳转到在线 Doxygen。
 
 ## 相关页面
 

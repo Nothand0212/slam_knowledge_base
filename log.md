@@ -4,6 +4,21 @@
 
 ---
 
+## 2026-05-27 ingest | GTSAM IMU API details from official website (anysearch)
+
+- **来源**：官方 GTSAM 网站搜索（gtsam.org/notes/imu-factor/、borglab.github.io/gtsam/imufactor/、gtsam.org/doxygen/a04659.html、github.com/borglab/gtsam examples/ImuFactorsExample.cpp）
+- **更新页面**：
+  - [[概念-IMU预积分]]：3.2 节新增 GTSAM 4 Tangent vs Manifold 预积分说明，含 `GTSAM_TANGENT_PREINTEGRATION` 编译 flag 和 Lupton/Carlone/Forster 学术引用
+  - [[GTSAM Navigation 与 IMU API]]：`ImuFactor2` 节扩展为 ternary factor 详细说明含代码示例；`CombinedImuFactor` 节新增与标准 `ImuFactor` 的三点关键区别（6-way 因子、bias 估计噪声传播、相关性保留）
+  - [[GTSAM 4.3a1 使用指南]]：新增"官方 C++ 示例"节，引用 `ImuFactorsExample.cpp` 的 GPS/IMU 因子图完整流程和真实噪声参数
+- **更新页面**：index.md、log.md
+
+## 2026-05-25 synthesis | SLAM 算法全景图谱
+
+- **新增综合分析**：[[SLAM算法全景图谱]]
+- **覆盖范围**：35 个 SLAM/VIO/LIO/LVI/GNSS/雷达/建图/工具项目，按算法家族树、跨子系统表和新手阅读路径组织
+- **关联页面**：[[VIO方案全景对比]]、[[LiDAR-SLAM路线图对比]]、[[优化后端选型指南]]、[[因子图vs滤波]]、[[从零搭多传感器融合系统]]
+
 ## 2026-05-15 ingest | 4 篇神经 SLAM 论文精读
 
 - **素材来源**：arXiv 论文 PDF（NICE-SLAM / 3DGS / DROID-SLAM / DM-VIO）
@@ -285,3 +300,10 @@
 - 将 `raw/codes/` 明确定义为只读源码快照区，而不是嵌套 Git 仓库或 submodule
 - 新增 `raw/codes/MANIFEST.md` 记录各源码项目的 upstream、分支、HEAD commit 和删除 `.git` 前的 dirty 状态
 - 更新 `AGENTS.md` 与 `.wiki-schema.md`：后续新增或替换源码快照时，必须先记录版本来源，再维护 wiki 中的源码行号锚点
+
+## 2026-05-18 ingest | HarmonyOS ArkTS 踩坑经验 — Pura X Max 折叠屏开发
+
+新增页面：
+- wiki/sources/2026-05-18-harmonyos-arkts-pitfalls.md
+- wiki/entities/方法-TextArea多行文本.md
+- wiki/entities/概念-折叠屏UI布局.md

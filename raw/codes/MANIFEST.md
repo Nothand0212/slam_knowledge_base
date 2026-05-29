@@ -1,6 +1,7 @@
 # raw/codes 源码快照清单
 
 > 生成日期：2026-04-30
+> 最后更新：2026-05-29
 
 `raw/codes/` 是知识库的只读源码快照区，用于源码检索、行号锚点和 `Agent 实现提示` 中的短代码片段。这里的项目不作为可继续开发的 Git 仓库维护；删除子项目 `.git` 后，版本信息以本清单为准。
 
@@ -40,6 +41,7 @@
 | dso | master | `7b0c99f01d238f801c625beaff90240bcb007198` | `https://github.com/JakobEngel/dso.git` | true | `dso.pdf` |
 | fusions_slam | master | `e362c6458db383ae7ebf708c5575d508ce1f8ce3` | `https://github.com/LiangHongY/fusions_slam.git` | false | - |
 | genz-icp | master | `d3ca3c4897d7e1df611bc60c0c8f1a19ecd593a9` | `https://github.com/cocel-postech/genz-icp.git` | false | - |
+| gtsam | develop | `fc790b0916a81a56077fc197ad8259d5efa63972` | `https://github.com/borglab/gtsam.git` | false | - |
 | kiss-icp | main | `b16835283aee62f7d5e2bdf6c1c3bb2930de74ff` | `https://github.com/PRBonn/kiss-icp.git` | false | - |
 | lightning-lm | master | `7062399a93a6844230f9fd5ad6f4d72ab45f5938` | `https://github.com/gaoxiang12/lightning-lm.git` | false | - |
 | lt-mapper | main | `80b67567b356850a10e883c1530e4e69314eaa62` | `https://github.com/gisbi-kim/lt-mapper.git` | false | - |
