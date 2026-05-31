@@ -4,6 +4,12 @@
 
 ---
 
+## 2026-06-01 ingest | 双目 VIO 路标管线设计
+
+- 新增综合分析：[[landmark-pipeline-design]]（15 个状态 / 9 个阶段 / 10 个失败模式 / 30+ 参数 / 完整伪代码）
+- 研究素材：Kimera-VIO RegularVioBackend, SVO Pro DepthFilter, ORB-SLAM3 MapPointCulling, DM-VIO DelayedMarginalization, VINS-Fusion feature_manager, OKVIS2
+- 更新 index.md：综合分析区添加新条目
+
 ## 2026-05-27 ingest | GTSAM IMU API details from official website (anysearch)
 
 - **来源**：官方 GTSAM 网站搜索（gtsam.org/notes/imu-factor/、borglab.github.io/gtsam/imufactor/、gtsam.org/doxygen/a04659.html、github.com/borglab/gtsam examples/ImuFactorsExample.cpp）
