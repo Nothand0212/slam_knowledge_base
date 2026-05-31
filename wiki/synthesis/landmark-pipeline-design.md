@@ -647,7 +647,21 @@ def global_health_monitor(landmark_states, optimization_history):
 | ORB-SLAM3 | `LocalMapping.cc:L346-L385`, `MapPoint.cc:L216-L239` | MapPointCulling, found_ratio, mbBad |
 | DM-VIO | `DelayedMarginalization.h:L35-L167`, `Marginalization.cpp:L30-L180` | 延迟边缘化, Schur 补实现 |
 | VINS-Fusion | `feature_manager.cpp:L389-L428` | DLT 三角化, 视差角阈值 |
-| OKVIS2 | arXiv:2202.09199 | 位姿图边反转（路标作为变量保留、边缘化位姿时反转边方向） |
+| OKVIS2 | arXiv:2202.09199 | 可逆边缘化：Schur 补将路标压缩为位姿图边（H* 信息矩阵），回环时逆向复活为完整观测 |
+
+---
+
+## 附录 A: OKVIS2 可逆边缘化补充（待集成）
+
+OKVIS2 (Leutenegger, 2022) 提出了一种**可逆边缘化**机制：当路标需要降级时，通过 Schur 补将多个观测压缩为带精确信息矩阵 H* 的位姿-位姿边（而非直接丢弃），在回环时可逆向恢复为完整重投影观测。
+
+**对当前设计的启示**：
+- MARGINALIZED 状态可以升级为 **COMPRESSED（可逆压缩）** 中间状态
+- 压缩边保留 H* 信息矩阵（含完整观测几何），而非仅保留对角权重
+- MST（最大生成树）边选择策略：以共视路标数量为权重，确保最重要协视关系可恢复
+- 复活（revival）条件：回环检测成功时，或路标重新被 ≥ K 帧观测到时
+
+当前 MVP 仍采用不可逆 MARGINALIZED → CULLED 路径，OKVIS2 的可逆边缘化作为 Phase 2 增强。
 
 ---
 
