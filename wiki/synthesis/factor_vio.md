@@ -1161,7 +1161,68 @@ ORB-SLAM3 **不使用 SmartStereo**——它基于 g2o，所有路标都是显�
 | 新增路标的 BA 成本 | O(n³) 随路标数增长 (全局批量) | O(1) 增量 (仅受影响 clique) |
 | 路标总数上限 | 受限于批量 BA 计算时间 (通常 1000-3000) | 受限于 iSAM2 窗口大小 (固定, ~25-30 KFs 内的路标) |
 
-### 5.4b 两种路标哲学的深度对比: ORB-SLAM3 显式 vs Factor-VIO 隐式→显式
+### 5.4b 为什么 Kimera 用隐式路标，而 VINS/ORB-SLAM3 用显式路标？
+
+这不是偶然的技术选择——是后端架构决定的必然结果。
+
+#### Kimera-VIO 选择 SmartFactor 的原因
+
+1. **GTSAM 血缘**。SmartFactor 是 MIT Luca Carlone 组贡献给 GTSAM 的核心创新（Carlone et al., ICRA 2014）。Kimera-VIO 由同组开发——用自己的因子是自然的。
+
+2. **iSAM2 增量性能的关键保障**。SmartFactor 通过 Schur 补将路标从状态中消去——Bayes Tree 的规模只取决于位姿数，与路标数无关。这是 iSAM2 实现 O(1) 增量更新的前提。
+
+3. **双目天然有深度**。单目需要用深度滤波器、逆深度参数化等方式初始化路标深度。双目的 SmartFactor 从第一帧观测就能三角化——不需要额外的初始化系统。
+
+4. **结构无关（structureless）范式的简洁性**。不管理路标变量生命周期、不维护路标地图、不处理路标合并/替换/跨图转移。代码量远小于 ORB-SLAM3 的 MapPoint 系统。
+
+#### VINS-Fusion 选择显式路标的原因
+
+1. **Ceres 没有 SmartFactor**。VINS-Fusion 的后端是 Ceres Solver，支持的是显式参数块。路标以逆深度（1 参数）参数化，在滑动窗口中与位姿、速度、偏置一起优化。
+
+2. **滑动窗口的 Schur 补要求显式变量**。VINS 的边缘化需要显式的路标变量才能做 Schur 消元→先验压缩。没有显式路标变量，边缘化无法进行。
+
+3. **工程惯性**。VINS-Fusion 从 VINS-Mono 演进而来，VINS-Mono 用显式路标达到了 SOTA。没有切换的动力。
+
+#### ORB-SLAM3 选择显式路标的原因
+
+1. **g2o 没有 SmartFactor 等价物**。g2o 的所有优化都基于显式顶点（VertexSE3Expmap、VertexSBAPointXYZ）。
+
+2. **MapPoint 不只是 3D 坐标**。ORB-SLAM3 的 MapPoint 承载了大量比 3D 位置更重要的信息：
+   - **ORB 描述子**：回环检测的基础。没有描述子就没有 DBoW2。
+   - **观测历史**：哪些 KF 的第几个关键点观测了它——用于 Local BA 选边、MapPointCulling、重定位。
+   - **统计信息**：`found_ratio`、`mnVisible`、`mnFound`——决定路标质量的依据。
+   - **替换/合并**：`Replace()` 将一个 MapPoint 的观测转移给另一个——Atlas 多地图合并的基础。
+
+3. **Full BA 需要显式路标**。ORB-SLAM3 的 Global Bundle Adjustment 同时优化所有 KF 和所有 MapPoint。SmartFactor 的隐式路标无法参与全局优化。
+
+4. **重定位需要描述子**。跟踪丢失后，ORB-SLAM3 用当前帧的 ORB 描述子匹配 MapPoint 的描述子做 PnP 重定位。SmartFactor 没有描述子。
+
+#### 三种选择的核心约束
+
+```
+后端是 g2o (ORB-SLAM3)
+  → 必须显式路标（VertexSBAPointXYZ）
+  → 附带获得：描述子、回环、重定位、Full BA
+
+后端是 Ceres (VINS-Fusion)
+  → 必须显式路标（参数块）
+  → 附带获得：逆深度参数化、滑动窗口边缘化
+
+后端是 GTSAM iSAM2 (Kimera-VIO)
+  → 可选 SmartFactor 或显式路标
+  → 选择 SmartFactor：O(1) 增量、无路标管理负担
+  → 代价：无描述子、无回环集成、无 Full BA
+```
+
+#### Factor-VIO 的混合路线
+
+**Kimera 选 SmartFactor 是因为 iSAM2 让它成为可能，不是因为显式路标不好。**
+
+Factor-VIO 的"试用期 SmartFactor → 晋升显式路标"正是要同时获得两者的优势：
+- 日常运营：SmartFactor 的 O(1) 增量和低管理负担
+- 回环/全局 BA/重定位：显式路标的描述子和全局优化能力
+
+这和 OKVIS2 的设计理念一致——OKVIS2 在正常运营时将路标边缘化为位姿图边（类似 SmartFactor），回环时再逆向恢复为显式路标和观测。
 
 #### 一、架构哲学
 
