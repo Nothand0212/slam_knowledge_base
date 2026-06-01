@@ -1839,6 +1839,7 @@ bool failureDetection(Vector3d acc_bias, Vector3d gyr_bias) {
     if (T_b_cam.translation().norm() > 1.0)  return true;  // 外参异常
     return false;
 }
+```
 
 ---
 
