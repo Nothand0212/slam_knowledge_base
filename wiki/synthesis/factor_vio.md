@@ -1036,6 +1036,44 @@ Factor-VIO 的 BA (隐式 iSAM2 增量):
 
 **BA 层级对照**：
 
+### 5.4a ORB-SLAM3 的因子体系 (g2o 边) 与 Factor-VIO (GTSAM 因子) 对照
+
+ORB-SLAM3 **不使用 SmartStereo**——它基于 g2o，所有路标都是显式的 `VertexSBAPointXYZ`。
+
+**ORB-SLAM3 g2o 边类型** (`OptimizableTypes.h`):
+
+| g2o 边 | 连接 | 残差维度 | 用途 | Factor-VIO 等价 |
+|---------|------|---------|------|----------------|
+| `EdgeSE3ProjectXYZ` | `VertexSE3Expmap`(pose) + `VertexSBAPointXYZ`(point) | 2 (单目重投影) | Local BA / Full BA 的视觉约束 | `GenericStereoFactor<Pose3,Point3>` |
+| `EdgeStereoSE3ProjectXYZ` | `VertexSE3Expmap`(pose) + `VertexSBAPointXYZ`(point) | 3 (uL,uR,v) | 双目 Local BA 视觉约束 | `GenericStereoFactor<Pose3,Point3>` |
+| `EdgeSE3ProjectXYZOnlyPose` | `VertexSE3Expmap`(pose) 单边 | 2 | Motion-only BA (固定路标,只优化位姿) | iSAM2 增量自动等价——新因子不影响路标所在 clique |
+| `EdgeInertial` | `VertexSE3` + `VertexVelocity` + `VertexGyroBias` + `VertexAccBias` | 9 (er,ev,ep) | Local Inertial BA / Full Inertial BA | `ImuFactor` + `BetweenFactor<ConstantBias>` |
+| `EdgeInertialGS` | 上面 4 种 + `VertexGDir` + `VertexScale` | 9 | IMU 初始化优化 (含重力方向+尺度) | 初始化阶段专用因子图 |
+| `EdgeSim3ProjectXYZ` | `VertexSim3` + `VertexSBAPointXYZ` | 2 | 回环 Sim3 约束 | `BetweenFactor<Pose3>` (回环) |
+
+**ORB-SLAM3 g2o 顶点类型**:
+
+| g2o 顶点 | 维度 | Factor-VIO 等价 |
+|----------|------|----------------|
+| `VertexSE3Expmap` | 6 | `X(k) = Pose3` |
+| `VertexSBAPointXYZ` | 3 | `L(id) = Point3` |
+| `VertexVelocity` | 3 | `V(k) = Vector3` |
+| `VertexGyroBias` | 3 | `B(k).gyroscope()` |
+| `VertexAccBias` | 3 | `B(k).accelerometer()` |
+| `VertexGDir` | 2 (SO(3) 切空间) | 不显式建模; IMU 预积分隐式约束 |
+| `VertexScale` | 1 | 双目已知基线, 不需要 |
+
+**关键差异**:
+
+| | ORB-SLAM3 (g2o) | Factor-VIO (GTSAM) |
+|---|---|---|
+| 路标存在形式 | **始终显式** `VertexSBAPointXYZ` | SmartFactor 隐式 (试用期) → `Point3` 显式 (晋升后) |
+| 路标初始值 | 关键帧间 ORB 匹配+三角化 | 深度滤波器 (SVO Pro) → SmartFactor 隐式三角化 → 晋升时显式 |
+| 路标剔除 | `MapPointCulling`: found_ratio<0.25 或 2KF 后观测≤3 | chi² 后验 + SmartFactor 内部拒绝 + 连续 3 帧异常值 |
+| BA 中的路标角色 | **参与优化**——和位姿一起被 g2o LM 迭代 | 试用期: **不参与** (Schur 补消去); 晋升后: **参与** (iSAM2 状态变量) |
+| 新增路标的 BA 成本 | O(n³) 随路标数增长 (全局批量) | O(1) 增量 (仅受影响 clique) |
+| 路标总数上限 | 受限于批量 BA 计算时间 (通常 1000-3000) | 受限于 iSAM2 窗口大小 (固定, ~25-30 KFs 内的路标) |
+
 | ORB-SLAM3 | g2o 调用 | 优化变量 | Factor-VIO 等价物 |
 |-----------|---------|---------|------------------|
 | Motion-only BA | `Optimizer::PoseOptimization` | 仅当前帧位姿, 固定 MapPoint | `isam2.update()` 加新因子——新位姿自然被单独优化 (旧 clique 未受影响) |
