@@ -1662,184 +1662,804 @@ GTSAM MakeSharedD = NED (不兼容, 会导致优化发散)
 
 ## 九、探针系统设计
 
-> 参考 Kimera-VIO `DebugVioInfo` (`VioBackend-definitions.h:L111-225`) + `DebugTrackerInfo` (`Tracker-definitions.h:L78-190`) + ORB-SLAM3 `REGISTER_TIMES` 的设计模式。
-> 每个模块独立维护探针结构体，支持三级详细度 (SILENT/STATS/VERBOSE)，关键异常自动触发全量 dump。
+> 参考 Kimera-VIO `DebugVioInfo` + `DebugTrackerInfo` + ORB-SLAM3 `REGISTER_TIMES` 模式。
+> 每个模块独立维护探针结构体，在关键节点收集数据。支持 compile-time 宏控制 + 运行时 JSONL 输出。
 
-### 10.1 全局配置
+### 9.1 全局配置与宏控制
 
 ```cpp
+#define FACTOR_VIO_ENABLE_PROBES    1    // 0=编译排除(嵌入式), 1=启用
+
 struct ProbeConfig {
-    int verbosity_frontend = 0;    // 0=静默 1=计数 2=逐帧dump+图片
-    int verbosity_landmarks = 0;
-    int verbosity_backend = 0;
-    int verbosity_loop = 0;
-    bool save_frontend_images = false;
-    std::string image_output_dir = "/tmp/factor_vio_debug";
+    // 逐模块控制
+    bool enable_frontend = true;
+    bool enable_landmarks = true;
+    bool enable_backend = true;
+    bool enable_init = true;
+    bool enable_loop = true;
+
+    // 输出控制
+    bool jsonl_per_kf = true;          // 每KF输出一行JSONL
+    bool jsonl_on_abnormal_only = false; // 仅异常时输出
+    std::string jsonl_path = "/tmp/factor_vio_diag.jsonl";
+
+    // 图片输出 (仅前端)
+    bool save_kf_images = false;       // 关键帧可视化
+    bool save_stereo_images = false;   // 立体匹配可视化
+    std::string image_dir = "/tmp/factor_vio_img";
+
+    // 异常触发全量 dump
     bool dump_on_factor_failure = true;
     bool dump_on_cheirality = true;
     bool dump_on_tracking_lost = true;
-    bool enable_diagnostics_jsonl = true;
-    std::string diag_output_path = "diagnostics.jsonl";
+    std::string dump_dir = "/tmp/factor_vio_dump";
+
+    // 直方图收集 (可周期性 reset)
+    int histogram_reset_interval_kfs = 100;
 };
 ```
 
-### 10.2 前端探针
+### 9.2 前端探针
+
+#### 数据结构
 
 ```cpp
 struct FrontendProbe {
-    // 跟踪统计
-    int klt_attempted=0, klt_success=0, klt_fb_failed=0, klt_aged_out=0;
-    // RANSAC统计 (★新增: putatives+迭代数用于计算内点率)
-    int r2d2d_putatives=0, r2d2d_inliers=0, r2d2d_iters=0;
-    int r3d3d_putatives=0, r3d3d_inliers=0, r3d3d_iters=0;
-    // 立体匹配
-    int stereo_matched=0, stereo_failed_ncc=0, stereo_failed_disp=0;
-    // 右目关键点状态 (★新增)
-    int rkp_valid=0, rkp_no_depth=0, rkp_failed_arun=0;
-    // 空间分布 (5×7网格, 均值/标准差; std/mean<0.5=均匀)
-    int grid_counts[5][7];
-    bool isUniform() { return stddev/mean < 0.5; }
-    // 耗时 ms
-    double klt_ms=0, stereo_ms=0, ransac_ms=0, total_ms=0;
+
+    // ======== PHASE 3: KLT 跟踪 ========
+    int klt_attempted = 0;            // calcOpticalFlowPyrLK 输入的 prev_pts 数
+    int klt_success = 0;              // status[i]==1 的特征数
+    int klt_fb_failed = 0;            // 双向光流验证失败数 (||back-prev|| > 0.5px)
+    int klt_border_failed = 0;        // 边界外剔除数 (x<0 || x>=W || y<0 || y>=H)
+    int klt_aged_out = 0;             // track_age > max_feature_track_age(25) 强制淘汰
+    double klt_mean_error_px = 0;     // calcOpticalFlowPyrLK 返回 error 的均值
+
+    // ======== PHASE 5: 2D-2D RANSAC ========
+    int r2d2d_putatives = 0;          // RANSAC 输入: 有效 feature 匹配对总数
+    int r2d2d_inliers = 0;            // RANSAC 内点数 (epipolar 距离 < 1e-6)
+    int r2d2d_iters = 0;             // RANSAC 实际迭代次数
+    double r2d2d_inlier_ratio = 0;   // r2d2d_inliers / r2d2d_putatives
+
+    // ======== PHASE 5b: 3D-3D RANSAC ========
+    int r3d3d_putatives = 0;          // RANSAC 输入: 有 3D 深度的匹配对总数
+    int r3d3d_inliers = 0;            // RANSAC 内点数 (Mahalanobis² < 1.0)
+    int r3d3d_downgraded = 0;        // 外点但保留为 mono-only (降级不删)
+    int r3d3d_iters = 0;             // RANSAC 实际迭代次数
+    double r3d3d_inlier_ratio = 0;
+
+    // ======== PHASE 8: 立体匹配 ========
+    int stereo_matched = 0;           // NCC < 0.15 && disparity > 0
+    int stereo_failed_ncc = 0;       // NCC >= 0.15 (匹配质量不足)
+    int stereo_failed_disp = 0;      // disparity <= 0 (无效视差)
+    int stereo_depth_oob = 0;         // depth < 0.3m 或 > 15m
+    double stereo_ncc_mean = 0;       // 成功匹配的 NCC 均值
+    double stereo_ncc_min = 0;        // 成功匹配中最好的 NCC 分数
+    double stereo_ncc_max = 0;        // 成功匹配中最差的 NCC 分数
+
+    // ======== 右目关键点状态分布 ========
+    int rkp_valid = 0;               // KeypointStatus::VALID
+    int rkp_no_left = 0;             // NO_LEFT_RECT
+    int rkp_no_right = 0;            // NO_RIGHT_RECT
+    int rkp_no_depth = 0;            // NO_DEPTH
+    int rkp_failed_arun = 0;         // FAILED_ARUN (3D-3D 外点)
+
+    // ======== 特征空间分布 ========
+    // 将图像划分为 grid_rows × grid_cols 网格, 统计每格特征数
+    static constexpr int grid_rows = 5, grid_cols = 7;
+    int grid_counts[grid_rows][grid_cols] = {};
+    double grid_mean = 0;            // 每格平均特征数
+    double grid_stddev = 0;          // 标准差
+    double grid_uniformity = 0;      // = 1.0 - stddev/mean (1.0=完全均匀)
+    int grid_empty_cells = 0;        // 特征数为 0 的网格数
+
+    // ======== PHASE 7b: 特征检测 ========
+    int new_features_detected = 0;   // goodFeaturesToTrack 返回的角点数
+    int raw_corners_before_anms = 0; // ANMS 前的原始候选数 (~2000)
+    double feature_survival_rate = 0;// 当前帧活跃特征 / 上帧活跃特征
+
+    // ======== 耗时 (ms) ========
+    double time_klt_ms = 0;
+    double time_stereo_ms = 0;
+    double time_ransac_ms = 0;       // 2D-2D + 3D-3D 合计
+    double time_detect_ms = 0;       // GFTT + ANMS
+    double time_total_ms = 0;
 };
 ```
 
-**可视化** (verbosity≥2): 
-- `visualizeFeatureTracks()` — 当前帧特征点+颜色编码(绿=成熟/黄=3D外点/红=无深度/蓝=新track)+网格统计覆盖
-- `visualizeStereoMatches()` — 左右目匹配连线图, 红色=极线偏差>1px
+#### 收集点
 
-**健康检查**: KLT追踪率<30%警告 | 网格不均匀警告 | NCC匹配率<30%警告 | 3D-3D外点率>50%警告
+| 收集时机 | 填充的字段 |
+|---------|-----------|
+| PHASE 3 完成后 | `klt_attempted`, `klt_success`, `klt_mean_error_px` |
+| PHASE 3b 完成后 | `klt_aged_out` |
+| PHASE 4 完成后 | `klt_fb_failed`, `klt_border_failed` |
+| PHASE 5 完成后 | `r2d2d_*` |
+| PHASE 5b 完成后 | `r3d3d_*`, `rkp_*` |
+| PHASE 8 完成后 | `stereo_*`, `grid_*` |
+| PHASE 7b 完成后 | `new_features_*`, `raw_corners_*` |
+| 帧结束时 | `feature_survival_rate`, `time_*` |
 
-### 10.3 路标管线探针
+#### 健康检查
+
+```cpp
+struct FrontendAlerts {
+    bool klt_quality_warning = false;   // klt_success / klt_attempted < 0.5
+    bool klt_crisis = false;            // klt_success < 10 (即将丢失)
+    bool grid_nonuniform = false;       // grid_uniformity < 0.3
+    bool stereo_degraded = false;       // stereo_matched / (matched+failed_ncc) < 0.3
+    bool r3d3d_high_reject = false;     // r3d3d_inlier_ratio < 0.3 (深度质量差)
+    bool r2d2d_high_reject = false;     // r2d2d_inlier_ratio < 0.3 (跟踪质量差)
+    bool too_many_aged_out = false;     // klt_aged_out > 20
+    bool insufficient_features = false; // grid_counts 总计 < 50
+    bool time_budget_exceeded = false;  // time_total_ms > 20
+};
+
+FrontendAlerts checkFrontendHealth(const FrontendProbe& p) {
+    FrontendAlerts a;
+    double track_rate = (p.klt_attempted > 0) ?
+        (double)p.klt_success / p.klt_attempted : 1.0;
+    a.klt_quality_warning = (track_rate < 0.5);
+    a.klt_crisis = (p.klt_success < 10);
+    a.grid_nonuniform = (p.grid_uniformity < 0.3);
+    a.stereo_degraded = (p.stereo_matched + p.stereo_failed_ncc > 0) &&
+        ((double)p.stereo_matched / (p.stereo_matched + p.stereo_failed_ncc) < 0.3);
+    a.r3d3d_high_reject = (p.r3d3d_putatives > 0) &&
+        (p.r3d3d_inlier_ratio < 0.3);
+    a.r2d2d_high_reject = (p.r2d2d_putatives > 0) &&
+        (p.r2d2d_inlier_ratio < 0.3);
+    a.too_many_aged_out = (p.klt_aged_out > 20);
+    a.insufficient_features = (p.klt_success < 50);
+    a.time_budget_exceeded = (p.time_total_ms > 20);
+    return a;
+}
+```
+
+#### 可视化输出
+
+```cpp
+// 在 processFrame 末尾, 当 save_kf_images=true 时调用
+cv::Mat visualizeFeatureTracks(const cv::Mat& left_gray,
+    const std::vector<FeatureTrack>& tracks,
+    const FrontendProbe& p) {
+
+    cv::Mat vis; cv::cvtColor(left_gray, vis, cv::COLOR_GRAY2BGR);
+
+    // 特征点颜色编码
+    for (auto& t : tracks) {
+        cv::Scalar c;
+        if      (!t.has_stereo)                    c = CV_RED;    // 无深度
+        else if (t.stereo_3d3d_outlier)             c = CV_YELLOW; // 3D-3D 外点(降级)
+        else if (t.track_length < 3)                c = CV_BLUE;   // 新track
+        else if (t.track_length > 20)               c = CV_WHITE;  // 长寿命
+        else                                        c = CV_GREEN;  // 成熟track
+        cv::circle(vis, cv::Point2i(t.pixel_pt.x(), t.pixel_pt.y()),
+                   2, c, -1);
+    }
+
+    // 覆盖 5×7 网格线 + 每格计数
+    for (int r = 0; r < p.grid_rows; r++) {
+        for (int c = 0; c < p.grid_cols; c++) {
+            int x0 = c * left_gray.cols / p.grid_cols;
+            int y0 = r * left_gray.rows / p.grid_rows;
+            int x1 = (c+1) * left_gray.cols / p.grid_cols;
+            int y1 = (r+1) * left_gray.rows / p.grid_rows;
+            cv::rectangle(vis, cv::Point(x0,y0), cv::Point(x1,y1),
+                         CV_GRAY, 1);
+            cv::putText(vis, std::to_string(p.grid_counts[r][c]),
+                       cv::Point(x0+5, y0+20), 0, 0.5, CV_GRAY);
+        }
+    }
+
+    // 右上角统计面板
+    int y = 20;
+    auto stat = [&](const std::string& s) {
+        cv::putText(vis, s, cv::Point(10, y), 0, 0.4, CV_WHITE); y += 12;
+    };
+    stat(format("KLT: %d/%d (%.1f%%)  FBfail:%d  Age:%d  err:%.2f",
+        p.klt_success, p.klt_attempted,
+        100.0*p.klt_success/std::max(1,p.klt_attempted),
+        p.klt_fb_failed, p.klt_aged_out, p.klt_mean_error_px));
+    stat(format("2D2D RANSAC: %d/%d inl (%.1f%%, %d it)",
+        p.r2d2d_inliers, p.r2d2d_putatives,
+        100.0*p.r2d2d_inlier_ratio, p.r2d2d_iters));
+    stat(format("3D3D RANSAC: %d/%d inl (%.1f%%, %d it)  dg:%d",
+        p.r3d3d_inliers, p.r3d3d_putatives,
+        100.0*p.r3d3d_inlier_ratio, p.r3d3d_iters, p.r3d3d_downgraded));
+    stat(format("Stereo: %d ok  NCC:%.3f~%.3f avg:%.3f",
+        p.stereo_matched, p.stereo_ncc_min, p.stereo_ncc_max, p.stereo_ncc_mean));
+    stat(format("Grid: %.2f uniform  %d empty  new:%d",
+        p.grid_uniformity, p.grid_empty_cells, p.new_features_detected));
+    stat(format("Time: KLT:%.1f Stereo:%.1f RANSAC:%.1f Detect:%.1f Tot:%.1f",
+        p.time_klt_ms, p.time_stereo_ms, p.time_ransac_ms,
+        p.time_detect_ms, p.time_total_ms));
+
+    return vis;
+}
+
+// 立体匹配可视化: 左右目连线, 红色=极线偏差>1px
+cv::Mat visualizeStereoMatches(const cv::Mat& left, const cv::Mat& right,
+    const std::vector<std::pair<cv::Point2f,cv::Point2f>>& matches) {
+
+    cv::Mat vis(left.rows, left.cols*2, CV_8UC3);
+    cv::cvtColor(left,  vis(cv::Rect(0,0,left.cols,left.rows)), cv::COLOR_GRAY2BGR);
+    cv::cvtColor(right, vis(cv::Rect(left.cols,0,right.cols,right.rows)), cv::COLOR_GRAY2BGR);
+
+    for (auto& [lp, rp] : matches) {
+        cv::Scalar c = (abs(lp.y - rp.y) > 1.0) ? CV_RED : CV_GREEN;
+        cv::line(vis, lp, cv::Point2f(rp.x+left.cols, rp.y), c, 1);
+        cv::circle(vis, lp, 2, CV_BLUE, -1);
+        cv::circle(vis, cv::Point2f(rp.x+left.cols, rp.y), 2, CV_BLUE, -1);
+    }
+    return vis;
+}
+```
+
+---
+
+### 9.3 路标管线探针
+
+#### 数据结构
 
 ```cpp
 struct LandmarkProbe {
-    // 状态分布
-    int n_total=0, n_candidate=0, n_depth_filter=0, n_smart=0, n_explicit=0;
-    // SmartFactor健康
-    int sf_valid=0, sf_degenerate=0, sf_far=0, sf_outlier=0, sf_behind=0;
-    // 🔴 sf_behind>0 是严重问题——路标在相机后方
-    // 晋升统计
-    int promoted_kf=0, promoted_total=0;
-    int reject_gate[10]={0};  // 10个门控各拒绝次数
-    // chi²
-    int chi2_checked=0, chi2_warning=0, chi2_culled=0;
+
+    // ======== 状态分布 ========
+    int n_total = 0;                // 总路标数 (所有状态之和)
+    int n_candidate = 0;            // CANDIDATE: 仅跟踪, 无 3D
+    int n_depth_filter = 0;         // DEPTH_FILTER: 贝叶斯滤波中
+    int n_smart_trial = 0;          // SMART_TRIAL: SmartFactor 隐式
+    int n_promoting = 0;            // PROMOTING: 正在晋升
+    int n_explicit = 0;             // EXPLICIT+STABLE: 显式 Point3
+    int n_remediating = 0;          // REMEDIATING: 恢复中
+    int n_marginalized = 0;         // MARGINALIZED: 已边缘化
+    int n_culled = 0;               // CULLED: 已删除
+
+    // ======== 深度滤波器 ========
+    int df_converged_this_kf = 0;   // 本轮收敛数 (进入 SMART_TRIAL)
+    int df_diverged_this_kf = 0;    // 本轮发散数 (→ CULLED)
+    double df_mean_converge_kfs = 0;// 平均收敛所需关键帧数
+    double df_median_depth_m = 0;   // 收敛路标的深度中位数
+
+    // ======== SmartFactor 健康 (遍历所有 SmartFactor) ========
+    int sf_total = 0;               // SmartFactor 总数
+    int sf_valid = 0;               // point().valid() == true
+    int sf_degenerate = 0;          // isDegenerate() — 视差不足
+    int sf_far_point = 0;           // isFarPoint() — 超出距离阈值
+    int sf_outlier = 0;             // isOutlier() — 重投影异常
+    int sf_behind_camera = 0;       // isPointBehindCamera() — 🔴 严重问题!
+    int sf_non_initialized = 0;     // 尚未完成首次三角化
+    double sf_mean_obs = 0;         // SmartFactor 平均观测数
+    int sf_max_obs = 0;             // SmartFactor 最大观测数
+    double sf_mean_pixel_error = 0; // 有效 SmartFactor 的平均重投影误差 (px)
+    double sf_max_pixel_error = 0;  // 有效 SmartFactor 的最大重投影误差
+
+    // ======== 晋升统计 ========
+    int promoted_this_kf = 0;       // 本轮 SMART→PROMOTING→EXPLICIT
+    int promoted_total = 0;         // 历史累计晋升数
+    // 10 个门控的拒绝计数 (G1~G10):
+    int reject_G1_obs = 0;          // G1: 观测数 < 4
+    int reject_G2_triang = 0;       // G2: triangulate() 失败
+    int reject_G3_cheir = 0;        // G3: Cheirality 异常
+    int reject_G4_degen = 0;        // G4: isDegenerate
+    int reject_G5_far = 0;          // G5: isFarPoint
+    int reject_G6_outlier = 0;      // G6: isOutlier
+    int reject_G7_parallax = 0;     // G7: 视差角 < 3°
+    int reject_G8_reproj = 0;       // G8: 重投影误差 > 2px
+    int reject_G9_svd = 0;          // G9: SVD 条件数 > 1e6
+    int reject_G10_depth = 0;       // G10: 深度 < 0.1m
+
+    // ======== chi² 后验 ========
+    int chi2_checked = 0;           // 本轮检验的显式路标数
+    int chi2_passed = 0;            // chi² ≤ 7.815
+    int chi2_warning = 0;           // 单次 > 7.815
+    int chi2_culled = 0;            // 连续 3 次 > 7.815 → CULLED
+    double chi2_mean = 0;           // 平均值
+    double chi2_max = 0;            // 最大值
+    int chi2_remediating = 0;       // REMEDIATING 状态路标数
 };
 ```
 
-**SmartFactor观测验证** (verbosity≥2):
+#### 收集点
+
+| 收集时机 | 填充的字段 |
+|---------|-----------|
+| 每 KF 的路标管线处理后 | `n_*` (状态分布), `df_*`, `promoted_*`, `reject_*`, `chi2_*` |
+| 每 KF 的 SmartFactor 统计 | `sf_*` (遍历 `old_smart_factors_` 中所有 SmartFactor) |
+
+#### SmartFactor 观测验证
+
 ```cpp
-void verifySmartFactorObs(LandmarkId id, SmartStereoFactor::shared_ptr sf,
-                           const vector<FeatureObservation>& expected) {
-    // 检查: 观测数一致? 每个pose_key对应? 三角化valid?
-    // 不一致 → LOG(ERROR) + dump
+// verbosity≥2 时, 对每个活跃 SmartFactor 执行:
+void verifySmartFactorObservations(
+    LandmarkId lmk_id,
+    const SmartStereoProjectionPoseFactor::shared_ptr& sf,
+    const std::vector<FeatureTrack>& expected_tracks) {
+
+    // 检查 1: 观测数量
+    size_t actual_n = sf->keys().size();
+    size_t expected_n = expected_tracks.size();
+    if (actual_n != expected_n) {
+        LOG(ERROR) << "[PROBE] SF lmk=" << lmk_id
+                   << " obs mismatch: expected=" << expected_n
+                   << " actual=" << actual_n;
+        return;
+    }
+
+    // 检查 2: 每个 key 与期望的 KF ID 对应
+    for (size_t i = 0; i < actual_n; i++) {
+        auto sym = gtsam::Symbol(sf->keys().at(i));
+        if (sym.chr() != 'x') {
+            LOG(ERROR) << "[PROBE] SF lmk=" << lmk_id
+                       << " key[" << i << "] not a pose: chr=" << sym.chr();
+        }
+        KfId actual_kf = sym.index();
+        KfId expected_kf = expected_tracks[i].kf_id;
+        if (actual_kf != expected_kf) {
+            LOG(ERROR) << "[PROBE] SF lmk=" << lmk_id
+                       << " obs[" << i << "] KF mismatch: "
+                       << "expected=" << expected_kf << " actual=" << actual_kf;
+        }
+    }
+
+    // 检查 3: 当前三角化有效性
+    auto result = sf->point();
+    if (!result) {
+        LOG(WARNING) << "[PROBE] SF lmk=" << lmk_id
+                     << " triangulation invalid";
+    } else if (result->z() < 0) {
+        LOG(ERROR) << "[PROBE] SF lmk=" << lmk_id
+                   << " BEHIND CAMERA! z=" << result->z();
+    }
+}
+
+// 晋升质量验证: 晋升后立即对所有历史观测帧重投影
+void verifyPromotionQuality(
+    LandmarkId lmk_id,
+    const gtsam::Point3& promoted_pt,
+    const SmartStereoProjectionPoseFactor::shared_ptr& old_sf,
+    const gtsam::Values& current_estimate) {
+
+    auto keys = old_sf->keys();
+    auto meas = old_sf->measured();
+    for (size_t i = 0; i < keys.size(); i++) {
+        KfId kid = gtsam::Symbol(keys[i]).index();
+        auto pose = current_estimate.at<gtsam::Pose3>(gtsam::Symbol('x', kid));
+        auto p_cam = T_b_cam.inverse() * pose.inverse() * promoted_pt;
+
+        if (p_cam.z() <= 0) {
+            LOG(ERROR) << "[PROBE] Promotion lmk=" << lmk_id
+                       << " KF=" << kid << " BEHIND CAMERA!";
+            continue;
+        }
+
+        double reproj_uL = K.fx() * p_cam.x() / p_cam.z() + K.px();
+        double reproj_v  = K.fy() * p_cam.y() / p_cam.z() + K.py();
+        double reproj_uR = K.fx() * (p_cam.x()-K.baseline()) / p_cam.z() + K.px();
+
+        double err = sqrt(pow(meas[i].uL - reproj_uL, 2) +
+                          pow(meas[i].v  - reproj_v,  2) +
+                          pow(meas[i].uR - reproj_uR, 2));
+
+        if (err > 5.0) {
+            LOG(WARNING) << "[PROBE] Promotion lmk=" << lmk_id
+                         << " KF=" << kid << " reproj=" << err << "px";
+        }
+    }
 }
 ```
 
-**晋升质量验证**: 对每个晋升路标, 在所有历史观测帧中计算重投影误差, >5px警告.
+#### 健康检查
 
-### 10.4 后端探针
+```cpp
+struct LandmarkAlerts {
+    bool sf_behind_camera = false;    // 🔴 ANY sf_behind > 0
+    bool sf_high_degenerate = false;  // 🔴 (degenerate+non_init)/total > 0.5
+    bool sf_high_outlier = false;     // 🟡 sf_outlier/total > 0.3
+    bool promotion_stalled = false;   // 🟡 promoted_this_kf==0 for >20 KFs
+    bool chi2_high_culling = false;   // 🟡 chi2_culled > 5 per KF
+    bool df_high_divergence = false;  // 🟡 df_diverged > df_converged
+    bool explicit_starving = false;   // 🟡 n_explicit < 20 && n_total > 200
+};
+
+LandmarkAlerts checkLandmarkHealth(const LandmarkProbe& p) {
+    LandmarkAlerts a;
+    a.sf_behind_camera = (p.sf_behind_camera > 0);
+    a.sf_high_degenerate = (p.sf_total > 0 &&
+        (double)(p.sf_degenerate + p.sf_non_initialized) / p.sf_total > 0.5);
+    a.sf_high_outlier = (p.sf_total > 0 &&
+        (double)p.sf_outlier / p.sf_total > 0.3);
+    a.chi2_high_culling = (p.chi2_culled > 5);
+    a.df_high_divergence = (p.df_diverged_this_kf > p.df_converged_this_kf);
+    a.explicit_starving = (p.n_explicit < 20 && p.n_total > 200);
+    return a;
+}
+```
+
+---
+
+### 9.4 后端探针
+
+#### 数据结构
 
 ```cpp
 struct BackendProbe {
-    // 因子注入
-    int n_sf_added=0, n_sf_replaced=0, n_sf_promoted=0, n_imu=0, n_explicit=0;
-    int n_between=0, n_prior=0, n_deleted=0;
-    // iSAM2
-    int update_ok=0, update_fail=0, exc_indet=0, exc_cheir=0, exc_other=0;
-    // 耗时
-    double build_ms=0, isam2_ms=0, slot_ms=0, post_ms=0;
-    // 图大小
-    int factors=0, variables=0, explicit_lmks=0;
-    // ★ Hessian稀疏度 (线性化因子图→Hessian→零元统计)
-    int hessian_elements=0, hessian_zeros=0;
-    // ★ 优化前后误差对比
-    double error_before=0, error_after=0;
+
+    // ======== 因子注入 (每 KF) ========
+    int n_sf_added = 0;              // 新 SmartFactor (首次入图, slot==-1)
+    int n_sf_replaced = 0;           // 替换的 SmartFactor (clone+delete_slot+add)
+    int n_sf_promoted = 0;           // SmartFactor→GenericStereoFactor 转换
+    int n_imu = 0;                   // ImuFactor 数 (通常 1)
+    int n_explicit_new = 0;          // 新增 GenericStereoFactor (晋升产生)
+    int n_explicit_existing = 0;     // 已有显式路标的新观测
+    int n_between_stereo = 0;        // BetweenFactor (立体 RANSAC, 默认关)
+    int n_between_static = 0;        // BetweenFactor (静止约束, LOW_DISPARITY)
+    int n_prior_pose = 0;            // PriorFactor<Pose3>
+    int n_prior_vel = 0;             // PriorFactor<Vector3>
+    int n_prior_bias = 0;            // PriorFactor<ConstantBias>
+    int n_zupt = 0;                  // 零速先验
+    int n_deleted_slots = 0;         // delete_slots 中的槽位数
+
+    // ======== iSAM2 更新 ========
+    int update_ok = 0;               // update 成功
+    int update_fail = 0;             // update 失败 (任意异常)
+    int exc_indeterminant = 0;       // IndeterminantLinearSystemException
+    int exc_cheirality = 0;          // CheiralityException | StereoCheirality
+    int exc_other = 0;               // 其他 12 种异常
+    int exc_cheirality_recovers = 0; // Cheirality 异常中成功递归修复次数
+    int exc_cheirality_fails = 0;    // 递归 5 次仍失败
+
+    // ======== Motion-only BA ========
+    int moba_executed = 0;           // 本轮执行次数 (有 ≥10 显式路标时 =1)
+    int moba_obs_used = 0;           // 使用的显式路标观测数
+    int moba_iterations = 0;         // GN 迭代次数 (固定 4)
+    int moba_suspects_marked = 0;    // chi²>5.991 标记的 suspect 路标数
+
+    // ======== 因子图大小 ========
+    int graph_factors = 0;           // smoother_->getFactors().size()
+    int graph_variables = 0;         // state_.size()
+    int graph_explicit_lmks = 0;     // L(*) 变量数
+    int graph_smart_factors = 0;     // SmartFactor 数 (遍历 dynamic_cast)
+
+    // ======== Hessian 稀疏度 ========
+    int hessian_elements = 0;        // 线性化后 Hessian 总元素数
+    int hessian_zeros = 0;           // 零元素数 (abs < 1e-15)
+    double hessian_sparsity = 0;     // = 1.0 - zeros/elements
+
+    // ======== 优化前后误差 ========
+    double error_before = 0;         // graph.error(state) before update
+    double error_after = 0;          // graph.error(state) after update
+    double error_ratio = 0;          // = error_after / error_before
+
+    // ======== 耗时 (ms) ========
+    double time_factor_build_ms = 0; // 因子组装 (SmartFactor 遍历 + 排序)
+    double time_isam2_update_ms = 0; // smoother_->update()
+    double time_slot_recovery_ms = 0;// updateNewSmartFactorsSlots
+    double time_post_update_ms = 0;  // chi² 检查 + 状态更新
+    double time_moba_ms = 0;         // Motion-only BA
+    double time_total_ms = 0;
 };
 ```
 
-**因子注入验证** (verbosity≥2):
+#### 收集点
+
+| 收集时机 | 填充的字段 |
+|---------|-----------|
+| optimize() 阶段 1.5 后 | `moba_*`, `time_moba_ms` |
+| optimize() 阶段 0 后 | `n_sf_*`, `n_imu`, `n_explicit_*`, `n_between_*`, `n_prior_*`, `n_zupt`, `n_deleted_slots` |
+| optimize() 阶段 2 后 | `update_ok/fail`, `exc_*`, `graph_*`, `hessian_*`, `error_*` |
+| optimize() 结束后 | `time_*` |
+
+#### 因子注入验证
+
 ```cpp
-void verifyFactorInjection(const NonlinearFactorGraph& before,
-    const NonlinearFactorGraph& after, const BackendProbe& p,
-    const FactorIndices& deleted, const FactorIndices& new_idx) {
-    // 检查: 期望因子数=实际? 被删slot不在after中? 存活的slot仍是SmartFactor?
+void verifyFactorInjection(const NonlinearFactorGraph& graph_before,
+    const NonlinearFactorGraph& graph_after,
+    const BackendProbe& p,
+    const FactorIndices& delete_slots,
+    const FactorIndices& new_indices) {
+
+    // 检查 1: 新因子总数 = 各类型之和
+    int expected_new = p.n_sf_added + p.n_sf_replaced + p.n_sf_promoted
+                     + p.n_imu + p.n_explicit_new + p.n_explicit_existing
+                     + p.n_between_stereo + p.n_between_static
+                     + p.n_prior_pose + p.n_prior_vel + p.n_prior_bias + p.n_zupt;
+    int actual_new = graph_after.size() - graph_before.size() + delete_slots.size();
+
+    if (expected_new != actual_new) {
+        LOG(ERROR) << "[PROBE] Factor count mismatch: expected="
+                   << expected_new << " actual=" << actual_new;
+        LOG(ERROR) << "  Breakdown: sf_add=" << p.n_sf_added
+                   << " sf_rep=" << p.n_sf_replaced
+                   << " sf_prom=" << p.n_sf_promoted
+                   << " imu=" << p.n_imu
+                   << " exp_new=" << p.n_explicit_new
+                   << " exp_ex=" << p.n_explicit_existing
+                   << " btw_stereo=" << p.n_between_stereo
+                   << " btw_static=" << p.n_between_static
+                   << " prior_p=" << p.n_prior_pose
+                   << " prior_v=" << p.n_prior_vel
+                   << " prior_b=" << p.n_prior_bias
+                   << " zupt=" << p.n_zupt;
+    }
+
+    // 检查 2: 被删的 slot 确实不在 after 图中
+    for (auto& slot : delete_slots) {
+        if (graph_after.exists(slot)) {
+            LOG(ERROR) << "[PROBE] Deleted slot " << slot
+                       << " still in graph!";
+        }
+    }
+
+    // 检查 3: SmartFactor 的 slot 一致性
+    // new_indices 的前 N 个必须对应 SmartFactor (SmartFactor 排在最前面)
+    int sf_count = p.n_sf_added + p.n_sf_replaced;
+    for (int i = 0; i < sf_count; i++) {
+        auto g = graph_after.at(new_indices[i]);
+        if (!dynamic_cast<const SmartStereoProjectionPoseFactor*>(g.get())) {
+            LOG(ERROR) << "[PROBE] Slot " << new_indices[i]
+                       << " (index " << i << ") is NOT a SmartFactor!";
+        }
+    }
 }
 ```
 
-**Smoother状态快照** (异常触发):
+#### Smoother 状态快照 (异常触发)
+
 ```cpp
-void dumpSmootherState(const IncrementalFixedLagSmoother& s,
-    const Values& state, const string& reason) {
-    // 保存: factor_graph.dot (Graphviz), values.txt, error统计
+void dumpSmootherState(const std::string& reason,
+    const IncrementalFixedLagSmoother& smoother,
+    const NonlinearFactorGraph& new_factors,
+    const Values& new_values,
+    const FactorIndices& delete_slots) {
+
+    std::string dir = probe_config.dump_dir + "/" +
+        std::to_string(timestamp_ns) + "_" + reason + "/";
+    std::filesystem::create_directories(dir);
+
+    // 1. 因子图 → DOT 格式 (可用 Graphviz 打开)
+    std::ofstream dot(dir + "factor_graph.dot");
+    smoother.getFactors().saveGraph(dot);
+
+    // 2. 当前状态值 → 文本
+    std::ofstream val(dir + "values.txt");
+    smoother.calculateEstimate().print("Current estimate:", val);
+
+    // 3. 新因子 + 待删除槽位
+    std::ofstream nf(dir + "new_factors.txt");
+    nf << "New factors: " << new_factors.size() << "\n";
+    new_factors.print("", nf);
+    nf << "Delete slots: ";
+    for (auto& s : delete_slots) nf << s << " ";
+    nf << "\n";
+
+    // 4. 优化统计
+    auto factors = smoother.getFactors();
+    auto estimate = smoother.calculateEstimate();
+    double error = factors.error(estimate);
+    std::ofstream stats(dir + "stats.txt");
+    stats << "Factors: " << factors.size() << "\n"
+          << "Variables: " << estimate.size() << "\n"
+          << "Error: " << error << "\n"
+          << "Error/factor: " << error / std::max(1UL, factors.size()) << "\n";
+
+    // 5. SmartFactor 详情
+    int sf_count = 0;
+    std::ofstream sf_f(dir + "smart_factors.txt");
+    for (size_t i = 0; i < factors.size(); i++) {
+        auto sf = dynamic_cast<const SmartStereoProjectionPoseFactor*>(
+            factors.at(i).get());
+        if (!sf) continue;
+        sf_count++;
+        sf_f << "SF[" << i << "]: obs=" << sf->keys().size()
+             << " valid=" << sf->point().valid()
+             << " degenerate=" << sf->isDegenerate()
+             << " behind=" << sf->isPointBehindCamera()
+             << " outlier=" << sf->isOutlier()
+             << " far=" << sf->isFarPoint() << "\n";
+    }
+    sf_f << "Total SmartFactors: " << sf_count << "\n";
+
+    LOG(ERROR) << "[PROBE] Smoother state dumped to " << dir
+               << " (reason: " << reason << ")";
 }
 ```
 
-### 10.5 初始化 + 回环探针
+#### 健康检查
+
+```cpp
+struct BackendAlerts {
+    bool isam2_failure = false;          // 🔴 update_fail > 0
+    bool cheirality_recovery_fail = false; // 🔴 exc_cheirality_fails > 0
+    bool indeterminant_system = false;   // 🔴 exc_indeterminant > 0
+    bool high_relinearization = false;   // 🟡 (待补充)
+    bool error_ratio_spike = false;      // 🟡 error_ratio > 2.0
+    bool hessian_dense = false;          // 🟡 sparsity < 0.5
+    bool time_budget_exceeded = false;   // 🟡 time_total_ms > 50
+    bool sf_count_mismatch = false;      // 🟡 graph_smart_factors != n_sf_total
+};
+
+BackendAlerts checkBackendHealth(const BackendProbe& p) {
+    BackendAlerts a;
+    a.isam2_failure = (p.update_fail > 0);
+    a.cheirality_recovery_fail = (p.exc_cheirality_fails > 0);
+    a.indeterminant_system = (p.exc_indeterminant > 0);
+    a.error_ratio_spike = (p.error_ratio > 2.0);
+    a.hessian_dense = (p.hessian_sparsity < 0.5);
+    a.time_budget_exceeded = (p.time_total_ms > 50);
+    return a;
+}
+```
+
+---
+
+### 9.5 初始化 + 回环探针
 
 ```cpp
 struct InitProbe {
-    bool static_ok=false, dynamic_ok=false; int retry=0;
-    double accel_var=0, gravity_err=0;
-    Vector3 est_bg, est_ba; bool bg_valid, ba_valid;
-    int kfs_collected=0; double avg_chi2=0;
+    // === 状态 ===
+    bool static_attempted = false;
+    bool static_succeeded = false;      // 静止条件满足 + 重力估计通过
+    bool dynamic_attempted = false;
+    bool dynamic_succeeded = false;
+    int retry_count = 0;
+
+    // === 静止检测 (静态初始化) ===
+    double accel_variance = 0;          // 加速度计方差 (m²/s⁴)
+    double static_duration_s = 0;       // 已持续静止时长 (s)
+
+    // === 重力估计 ===
+    gtsam::Vector3 estimated_gravity;
+    double gravity_magnitude = 0;       // |g_est|
+    double gravity_magnitude_error = 0; // ||g_est| - 9.81|
+
+    // === 偏置估计 ===
+    gtsam::Vector3 estimated_bg;        // 陀螺偏置
+    gtsam::Vector3 estimated_ba;        // 加计偏置
+    bool bg_valid = false;              // |bg| < 0.1 rad/s
+    bool ba_valid = false;              // |ba| < 0.5 m/s²
+
+    // === 动态初始化 ===
+    int kfs_collected = 0;              // 累积关键帧数
+    double motion_duration_s = 0;       // 运动持续时长
+    double avg_chi2_per_factor = 0;     // 初始化优化收敛指标
 };
+
 struct LoopProbe {
-    int queries=0, candidates=0, verified=0, accepted=0;
-    int reject_score=0, reject_time=0, reject_geom=0, reject_cov=0;
-    int sf_promoted_post_loop=0, sf_failed=0;
-    double drift_corrected_m=0;
+    // === 检测管道 ===
+    int dbow_queries = 0;              // DBoW3 查询总次数
+    int dbow_candidates = 0;           // 评分 > 0.015 的候选帧数
+    int temporal_filtered = 0;         // 时间过滤(< 50 KF) 排除数
+    int group_confirmed = 0;           // 分组一致性(≥3 连续 KF) 通过数
+
+    // === 几何验证 ===
+    int geom_verified = 0;             // PnP 验证通过数
+    int geom_rejected = 0;             // PnP 验证失败数
+    int pnp_matches = 0;               // 当前 PnP 匹配特征数
+    int pnp_inliers = 0;               // 当前 PnP 内点数
+    double pnp_mean_reproj = 0;        // PnP 平均重投影误差 (px)
+
+    // === 回环接受/拒绝原因 ===
+    int rejected_score = 0;            // BoW 评分不足
+    int rejected_time = 0;             // 时间过滤
+    int rejected_geometry = 0;         // PnP 验证失败
+    int rejected_covisible = 0;        // 共视邻居 < 3
+
+    // === 回环后处理 ===
+    int loop_accepted = 0;             // 累计接受的回环数
+    int sf_promoted_post_loop = 0;     // Post-loop SmartFactor 提升数
+    int sf_failed_post_loop = 0;       // Post-loop 提升失败数
+    double drift_corrected_m = 0;      // 最近回环消除的漂移量 (m)
+
+    // === PGO 统计 ===
+    int pgo_edges_total = 0;           // 位姿图中总边数
+    int pgo_loop_edges = 0;            // 回环边数
 };
 ```
 
-### 10.6 JSONL诊断输出
+---
 
-每KF一行JSONL, 含 `frontend{...} landmarks{...} backend{...} init{...} loop{...}`, 离线用 `jq` 或 Python pandas 分析.
+### 9.6 JSONL 输出格式
 
-### 10.7 使用示例
+每关键帧输出一行完整 JSON (无换行), 各模块为嵌套对象:
 
-```cpp
-auto fp = frontend.getProbe(), lp = landmarks.getProbe();
-auto bp = backend.getProbe();
-if (cfg.enable_jsonl) writeDiagnosticsJsonl(ts, kf_id, fp, lp, bp);
-if (!checkFrontendHealth(fp) || !checkLandmarkHealth(lp) || !checkBackendHealth(bp))
-    dumpFullState();  // 全量快照
-```
-
-### 10.8 GTSAM 诊断 API 速查
-
-iSAM2 启用诊断必须设置 `evaluateNonlinearError=true` + `enableDetailedResults=true`：
-
-```cpp
-ISAM2Params params;
-params.evaluateNonlinearError = true;   // 计算 errorBefore/errorAfter
-params.enableDetailedResults = true;    // 填充 variablesRelinearized 等
-ISAM2 isam(params);
-
-auto result = isam.update(new_factors, new_values);
-// result.errorBefore / errorAfter — 优化前后非线性误差
-// result.variablesRelinearized — 重线性化变量数 (>20 可能有问题)
-// result.variablesReeliminated — 重消元变量数 (回环时暴增正常)
-// result.factorsRecalculated — 重新计算的因子数
-// result.cliques — 贝叶斯树团数
-
-// 运行时诊断 (无 ISAM2Result 时也可用)
-auto grad = isam.gradientAtZero();        // 梯度范数, →0 表示收敛
-auto fixed = isam.getFixedVariables();     // 被边缘化锁定的变量
-auto cov = isam.marginalCovariance(key);   // 某变量的边际协方差
-auto factors = isam.getFactorsUnsafe();    // 当前线性化后的因子图
-```
-
-**VINS-Fusion 风格的失败检测** (参考 `estimator.cpp:L955`):
-```cpp
-bool failureDetection(Vector3d acc_bias, Vector3d gyr_bias) {
-    if (f_manager.last_track_num < 2)        return true;  // 特征不足
-    if (acc_bias.norm() > 2.5)               return true;  // 加计偏置发散
-    if (gyr_bias.norm() > 1.0)               return true;  // 陀螺偏置发散
-    if (T_b_cam.translation().norm() > 1.0)  return true;  // 外参异常
-    return false;
+```json
+{
+  "ts": 1403636579763555584, "kf_id": 42, "is_kf": true,
+  "frontend": {
+    "klt": {"att": 210, "ok": 187, "fb": 3, "age": 0, "err": 0.12},
+    "ransac_2d": {"put": 187, "inl": 153, "its": 15, "rate": 0.82},
+    "ransac_3d": {"put": 98, "inl": 76, "dg": 22, "its": 8, "rate": 0.78},
+    "stereo": {"ok": 142, "ncc_f": 12, "disp_f": 5, "oob": 3,
+               "ncc_avg": 0.08, "ncc_min": 0.02, "ncc_max": 0.14},
+    "rkp": {"v": 142, "nl": 0, "nr": 12, "nd": 5, "fa": 22},
+    "grid": {"uni": 0.73, "empty": 2, "mean": 5.2, "std": 3.1},
+    "detect": {"new": 48, "raw": 287},
+    "survival": 0.89,
+    "time": {"klt": 4.2, "stereo": 3.1, "ransac": 2.8, "detect": 1.5, "tot": 12.3}
+  },
+  "landmarks": {
+    "states": {"tot": 423, "cand": 51, "df": 89, "smart": 203, "expl": 80},
+    "sf": {"tot": 203, "ok": 189, "deg": 8, "far": 0, "out": 6, "behind": 0,
+           "noninit": 0, "mean_obs": 5.3, "max_obs": 18,
+           "mean_px": 0.8, "max_px": 2.3},
+    "promote": {"kf": 3, "tot": 156,
+                "rej": {"G7": 5, "G2": 2, "G8": 1}},
+    "chi2": {"chk": 80, "ok": 78, "warn": 2, "cull": 0, "mean": 2.1, "max": 12.4},
+    "df": {"conv": 4, "div": 1, "med_d": 3.2}
+  },
+  "backend": {
+    "factors": {"sf_add": 180, "sf_rep": 23, "sf_prom": 3, "imu": 1,
+                "exp_n": 3, "exp_x": 8, "btw_s": 0, "btw_st": 0,
+                "p_p": 0, "p_v": 0, "p_b": 0, "zupt": 0, "del": 5},
+    "isam2": {"ok": 1, "fail": 0, "indet": 0, "cheir": 0, "other": 0},
+    "moba": {"exe": 1, "obs": 80, "iter": 4, "susp": 2},
+    "graph": {"fac": 1347, "var": 352, "expl": 80, "sf": 203},
+    "hessian": {"ele": 4512, "zero": 3200, "sp": 0.71},
+    "error": {"bef": 521.3, "aft": 478.9, "rat": 0.92},
+    "time": {"build": 5.2, "isam2": 18.3, "slot": 0.8, "post": 3.1,
+             "moba": 2.1, "tot": 32.4}
+  },
+  "init": {"state": "INITIALIZED", "g_err": 0.02, "bg_norm": 0.003},
+  "loop": {"acc": 0, "cand": 0}
 }
 ```
+
+---
+
+### 9.7 使用示例与运行时集成
+
+```cpp
+// 在 processKeyframe() 末尾统一收集
+void processKeyframe(const LocalGraphKeyframeInput& in) {
+    // ... 正常处理 ...
+
+    // ===== 探针收集 =====
+    auto& fp = frontend_.probe();
+    auto& lp = landmark_pipeline_.probe();
+    auto& bp = backend_.probe();
+    auto& ip = init_.probe();
+
+    // 每 KF 输出 JSONL
+    if (cfg_.probe.jsonl_per_kf) {
+        writeDiagnosticsJsonl(cfg_.probe.jsonl_path,
+                              timestamp_ns, kf_id, fp, lp, bp, ip,
+                              loop_.probe());
+    }
+
+    // 健康检查
+    auto fa = checkFrontendHealth(fp);
+    auto la = checkLandmarkHealth(lp);
+    auto ba = checkBackendHealth(bp);
+
+    bool abnormal = fa.klt_crisis || la.sf_behind_camera ||
+                    ba.isam2_failure || ba.cheirality_recovery_fail;
+
+    // 异常 → 全量 dump
+    if (abnormal && cfg_.probe.dump_on_factor_failure) {
+        dumpSmootherState("abnormal", smoother_, new_factors,
+                          new_values_, delete_slots);
+        // 同时输出上一帧正常的 JSONL 作为对比
+        writeDiagnosticsJsonl(cfg_.probe.jsonl_path + ".prev",
+                              timestamp_ns, kf_id, fp, lp, bp, ip,
+                              loop_.probe());
+    }
+
+    // 前端可视化
+    if (cfg_.probe.save_kf_images && is_keyframe) {
+        auto vis_features = visualizeFeatureTracks(left_img, tracks, fp);
+        auto vis_stereo   = visualizeStereoMatches(left_img, right_img, matches);
+        cv::imwrite(cfg_.probe.image_dir + "/features_" +
+                    std::to_string(kf_id) + ".png", vis_features);
+        cv::imwrite(cfg_.probe.image_dir + "/stereo_" +
+                    std::to_string(kf_id) + ".png", vis_stereo);
+    }
+
+    // 周期性清空直方图避免溢出
+    if (kf_id % cfg_.probe.histogram_reset_interval_kfs == 0) {
+        fp.resetHistograms();
+        lp.resetHistograms();
+    }
+}
 
 ---
 
