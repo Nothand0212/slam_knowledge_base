@@ -1499,7 +1499,148 @@ GTSAM MakeSharedD = NED (不兼容, 会导致优化发散)
 
 ---
 
-## 九、相关页面
+## 十、探针系统设计
+
+> 参考 Kimera-VIO `DebugVioInfo` (`VioBackend-definitions.h:L111-225`) + `DebugTrackerInfo` (`Tracker-definitions.h:L78-190`) + ORB-SLAM3 `REGISTER_TIMES` 的设计模式。
+> 每个模块独立维护探针结构体，支持三级详细度 (SILENT/STATS/VERBOSE)，关键异常自动触发全量 dump。
+
+### 10.1 全局配置
+
+```cpp
+struct ProbeConfig {
+    int verbosity_frontend = 0;    // 0=静默 1=计数 2=逐帧dump+图片
+    int verbosity_landmarks = 0;
+    int verbosity_backend = 0;
+    int verbosity_loop = 0;
+    bool save_frontend_images = false;
+    std::string image_output_dir = "/tmp/factor_vio_debug";
+    bool dump_on_factor_failure = true;
+    bool dump_on_cheirality = true;
+    bool dump_on_tracking_lost = true;
+    bool enable_diagnostics_jsonl = true;
+    std::string diag_output_path = "diagnostics.jsonl";
+};
+```
+
+### 10.2 前端探针
+
+```cpp
+struct FrontendProbe {
+    // 跟踪统计
+    int klt_attempted=0, klt_success=0, klt_fb_failed=0, klt_aged_out=0;
+    // RANSAC统计
+    int r2d2d_inliers=0, r2d2d_outliers=0, r3d3d_inliers=0, r3d3d_outliers=0;
+    // 立体匹配
+    int stereo_matched=0, stereo_failed_ncc=0, stereo_failed_disp=0;
+    // 空间分布 (5×7网格, 均值/标准差; std/mean<0.5=均匀)
+    int grid_counts[5][7];
+    bool isUniform() { return stddev/mean < 0.5; }
+    // 耗时 ms
+    double klt_ms=0, stereo_ms=0, ransac_ms=0, total_ms=0;
+};
+```
+
+**可视化** (verbosity≥2): 
+- `visualizeFeatureTracks()` — 当前帧特征点+颜色编码(绿=成熟/黄=3D外点/红=无深度/蓝=新track)+网格统计覆盖
+- `visualizeStereoMatches()` — 左右目匹配连线图, 红色=极线偏差>1px
+
+**健康检查**: KLT追踪率<30%警告 | 网格不均匀警告 | NCC匹配率<30%警告 | 3D-3D外点率>50%警告
+
+### 10.3 路标管线探针
+
+```cpp
+struct LandmarkProbe {
+    // 状态分布
+    int n_total=0, n_candidate=0, n_depth_filter=0, n_smart=0, n_explicit=0;
+    // SmartFactor健康
+    int sf_valid=0, sf_degenerate=0, sf_far=0, sf_outlier=0, sf_behind=0;
+    // 🔴 sf_behind>0 是严重问题——路标在相机后方
+    // 晋升统计
+    int promoted_kf=0, promoted_total=0;
+    int reject_gate[10]={0};  // 10个门控各拒绝次数
+    // chi²
+    int chi2_checked=0, chi2_warning=0, chi2_culled=0;
+};
+```
+
+**SmartFactor观测验证** (verbosity≥2):
+```cpp
+void verifySmartFactorObs(LandmarkId id, SmartStereoFactor::shared_ptr sf,
+                           const vector<FeatureObservation>& expected) {
+    // 检查: 观测数一致? 每个pose_key对应? 三角化valid?
+    // 不一致 → LOG(ERROR) + dump
+}
+```
+
+**晋升质量验证**: 对每个晋升路标, 在所有历史观测帧中计算重投影误差, >5px警告.
+
+### 10.4 后端探针
+
+```cpp
+struct BackendProbe {
+    // 因子注入
+    int n_sf_added=0, n_sf_replaced=0, n_sf_promoted=0, n_imu=0, n_explicit=0;
+    int n_between=0, n_prior=0, n_deleted=0;
+    // iSAM2
+    int update_ok=0, update_fail=0, exc_indet=0, exc_cheir=0, exc_other=0;
+    // 耗时
+    double build_ms=0, isam2_ms=0, slot_ms=0, post_ms=0;
+    // 图大小
+    int factors=0, variables=0, explicit_lmks=0;
+};
+```
+
+**因子注入验证** (verbosity≥2):
+```cpp
+void verifyFactorInjection(const NonlinearFactorGraph& before,
+    const NonlinearFactorGraph& after, const BackendProbe& p,
+    const FactorIndices& deleted, const FactorIndices& new_idx) {
+    // 检查: 期望因子数=实际? 被删slot不在after中? 存活的slot仍是SmartFactor?
+}
+```
+
+**Smoother状态快照** (异常触发):
+```cpp
+void dumpSmootherState(const IncrementalFixedLagSmoother& s,
+    const Values& state, const string& reason) {
+    // 保存: factor_graph.dot (Graphviz), values.txt, error统计
+}
+```
+
+### 10.5 初始化 + 回环探针
+
+```cpp
+struct InitProbe {
+    bool static_ok=false, dynamic_ok=false; int retry=0;
+    double accel_var=0, gravity_err=0;
+    Vector3 est_bg, est_ba; bool bg_valid, ba_valid;
+    int kfs_collected=0; double avg_chi2=0;
+};
+struct LoopProbe {
+    int queries=0, candidates=0, verified=0, accepted=0;
+    int reject_score=0, reject_time=0, reject_geom=0, reject_cov=0;
+    int sf_promoted_post_loop=0, sf_failed=0;
+    double drift_corrected_m=0;
+};
+```
+
+### 10.6 JSONL诊断输出
+
+每KF一行JSONL, 含 `frontend{...} landmarks{...} backend{...} init{...} loop{...}`, 离线用 `jq` 或 Python pandas 分析.
+
+### 10.7 使用示例
+
+```cpp
+auto fp = frontend.getProbe(), lp = landmarks.getProbe();
+auto bp = backend.getProbe();
+if (cfg.enable_jsonl) writeDiagnosticsJsonl(ts, kf_id, fp, lp, bp);
+if (!checkFrontendHealth(fp) || !checkLandmarkHealth(lp) || !checkBackendHealth(bp))
+    dumpFullState();  // 全量快照
+```
+
+---
+
+## 十一、相关页面
 
 - [[stereo-vio-integrated-architecture]]
 - [[设计-立体VIO前端管线]]
