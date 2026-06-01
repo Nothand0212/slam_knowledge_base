@@ -767,6 +767,38 @@ function optimize(timestamp_kf_nsec, cur_id, max_extra_iterations, extra_delete_
     //   时间戳 < max_timestamp - smootherLag → 被边缘化
     //   即: cur_id - key_timestamp > lag_states → 老变量被边缘化
     
+    // ===== 阶段 1.5: Motion-only BA (精化当前帧位姿, 固定路标) =====
+    // 目的: 在坏观测进入 iSAM2 之前拦截——iSAM2 的 FEJ 让错误不可逆
+    // 范围: 仅对显式路标 (SmartFactor 试用期路标依赖内部的 3σ 拒绝)
+    // 成本: ~2ms, 4 次 GN 迭代, 6-DOF 变量, 零新依赖 (复用 GenericStereoFactor)
+    // 对标: ORB-SLAM3 PoseOptimization (Tracking.cc motion-only BA)
+    if explicit_obs_this_kf.size() >= 10:
+        graph_mo = NonlinearFactorGraph()
+        values_mo = Values()
+        values_mo.insert(X(cur_id), pose_imu_predicted)  // IMU 预积分初值
+        
+        auto noise = Isotropic::Sigma(3, 1.5)             // 与显式因子一致
+        auto fix = Isotropic::Sigma(3, 1e-6)              // 极紧先验 ≈ 固定路标
+        
+        for each obs in explicit_obs_this_kf:
+            graph_mo.emplace_shared<GenericStereoFactor<Pose3,Point3>>(
+                StereoPoint2(obs.uL, obs.uR, obs.v), noise,
+                X(cur_id), L(obs.lmk_id), stereo_cal)
+            values_mo.insert(L(obs.lmk_id), obs.point3d)
+            graph_mo.addPrior(L(obs.lmk_id), obs.point3d, fix)
+        
+        result_mo = GaussNewtonOptimizer(graph_mo, values_mo,
+            GaussNewtonParams{maxIter=4, errorTol=0}).optimize()
+        refined_pose = result_mo.at<Pose3>(X(cur_id))
+        
+        // 用精化位姿覆盖 IMU 初值 → iSAM2 获得更好的线性化点
+        new_values_.update(X(cur_id), refined_pose)
+        
+        // 标记 suspect 路标: 重投影 > χ² 阈值 → 留给 post-update 二次裁决
+        for each obs in explicit_obs_this_kf:
+            err = computeStereoReprojError(refined_pose, obs)
+            if err.chi2 > 5.991: obs.suspect = true        // χ²_2, p=0.05
+    
     // ===== 阶段 2: iSAM2 增量 BA 优化 =====
     // ⚠️ isam2.update() 本身就是 Bundle Adjustment!
     // 它在 Bayes Tree 中做增量非线性优化:
