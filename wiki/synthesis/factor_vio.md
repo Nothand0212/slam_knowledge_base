@@ -698,11 +698,11 @@ Kimera-VIO 从 KF=1 立即启用 SmartFactor，无需"前N帧禁用"阶段。前
 
 | # | 来源 | GTSAM 类 | Kimera 创建位置 | 连接 | 噪声 | 何时使用 | Factor-VIO? |
 |---|------|----------|---------------|------|------|---------|------------|
-| P1 | 🏷️ | `PriorFactor<Pose3>` | `L1285`: 首帧; `L1448`: 异常恢复 | `X(0)` / `X(nearby)` | `Diag(1e-5,1e-5,1.75e-3,1e-5³)` | 初始化时 + IndeterminantLinearSystem 恢复时 | ✅ |
+| P1 | 🏷️ | `PriorFactor<Pose3>` | `L1285`: 首帧; `L1448`: 异常恢复 | `X(0)` / `X(nearby)` | `Gaussian::Covariance` (经B_Rot_W旋转,非对角); roll/pitch=0.1745rad, yaw=0.00175rad, pos=1e-5m | 初始化时 + IndeterminantLinearSystem 恢复时 | ✅ |
 | P2 | 🏷️ | `PriorFactor<Vector3>` | `L1296`: 首帧; `L1012`: 零速; `L1470`: 恢复 | `V(0)` / `V(k)` | `Isotropic(3,1e-3)` (首帧) / `Isotropic(3,0.032)` (零速) | 初始化时 + LOW_DISPARITY 时 + 恢复时 | ✅ |
 | P3 | 🏷️ | `PriorFactor<ConstantBias>` | `L1313`: 首帧; `L1460`: 恢复 | `B(0)` / `B(nearby)` | `Diag(0.1³,0.01³)` | 初始化时 + 恢复时 | ✅ |
 | P4 | 🏷️ | `LinearContainerFactor` | iSAM2 边缘化自动生成 | 被边缘化的变量群 | Schur 补自动计算 | 每次边缘化老变量后 | ✅ (自动) |
-| P5 | ❌ | `PriorFactor<Point3>` | RegularVioBackend (L2032 打印) | `L(id)` | — | 仅在 RegularVioBackend 中用于路标先验 | ❌ |
+| P5 | ❌ | `PriorFactor<Point3>` | VioBackend.cpp L2032(打印检测) | `L(id)` | — | VioBackend图中不应存在(L2226 CHECK断言) | ❌ |
 
 #### 5.2.4 相对约束因子
 
@@ -850,7 +850,7 @@ ORB-SLAM3 没有 iSAM2 增量优化，它的 LocalMapping 线程是**批量处�
 | 路标剔除 | chi² 后验 + SmartFactor 内部拒绝 | `MapPointCulling()`: found_ratio<0.25 或 创建2KF后观测≤3 |
 | 三角化 | SmartFactor 隐式 / 晋升时显式 | `CreateNewMapPoints()`: KF 间 ORB 匹配 + 视差检查 |
 | BA | iSAM2 增量自动处理 | `LocalBundleAdjustment()` / `LocalInertialBA()` 显式调用 |
-| 冗余 KF 剔除 | 边缘化自动处理 | `KeyFrameCulling()`: 90% 观测被其他 KF 覆盖则剔除 |
+| 冗余 KF 剔除 | 边缘化自动处理 | `KeyFrameCulling()`: 90%(视觉)/50%(双目惯性) 观测被其他 KF 覆盖则剔除 |
 | IMU 初始化 | 初始化阶段完成后开始 | `InitializeIMU()`: 在 LocalMapping 线程中渐进初始化 |
 
 **ORB-SLAM3 LocalMapping::Run() 的精确循环** (`LocalMapping.cc:L75-L195`):
@@ -904,7 +904,7 @@ function MapPointCulling():
 
 3. **ORB-SLAM3 的 BA 是显式调用**——`LocalBundleAdjustment` (仅视觉) / `LocalInertialBA` (视觉+IMU)。Factor-VIO 中 iSAM2 自动完成等价的增量优化。
 
-4. **ORB-SLAM3 的 `KeyFrameCulling`** 在 Factor-VIO 中没有直接对应——边缘化自动处理。但如果需要手动清理，可参考 ORB-SLAM3 的 90% 冗余观测阈值。
+4. **ORB-SLAM3 的 `KeyFrameCulling`** 在 Factor-VIO 中没有直接对应——边缘化自动处理。但如果需要手动清理，可参考 ORB-SLAM3 的冗余观测阈值 (视觉90%/双目惯性50%)。
 
 ### 5.3b 后端与 ORB-SLAM3 Tracking 线程的对照
 
@@ -939,7 +939,7 @@ function Track():
         
         case OK:
             CheckReplacedInLastFrame()                       // LocalMapping可能替换了MapPoint
-            if velocity_valid and IMU_initialized:
+            if mbVelocity or IMU_initialized:                // ⚠️ OR逻辑(源码), 非AND
                 bOK = TrackWithMotionModel()                 // 用mVelocity预测+投影匹配
             else:
                 bOK = TrackReferenceKeyFrame()               // BoW加速的参考KF匹配
@@ -1052,7 +1052,7 @@ ORB-SLAM3 **不使用 SmartStereo**——它基于 g2o，所有路标都是显�
 | `EdgeSE3ProjectXYZ` | `VertexSE3Expmap`(pose) + `VertexSBAPointXYZ`(point) | 2 (单目重投影) | Local BA / Full BA 的视觉约束 | `GenericStereoFactor<Pose3,Point3>` |
 | `EdgeStereoSE3ProjectXYZ` | `VertexSE3Expmap`(pose) + `VertexSBAPointXYZ`(point) | 3 (uL,uR,v) | 双目 Local BA 视觉约束 | `GenericStereoFactor<Pose3,Point3>` |
 | `EdgeSE3ProjectXYZOnlyPose` | `VertexSE3Expmap`(pose) 单边 | 2 | Motion-only BA (固定路标,只优化位姿) | iSAM2 增量自动等价——新因子不影响路标所在 clique |
-| `EdgeInertial` | `VertexSE3` + `VertexVelocity` + `VertexGyroBias` + `VertexAccBias` | 9 (er,ev,ep) | Local Inertial BA / Full Inertial BA | `ImuFactor` + `BetweenFactor<ConstantBias>` |
+| `EdgeInertial` | `VertexSE3`(pose_i+j) + `VertexVelocity`(v_i+j) + `VertexGyroBias` + `VertexAccBias` | 9 (er,ev,ep) | **6顶点**(2pose+2vel+2bias) | `ImuFactor` + `BetweenFactor<ConstantBias>` |
 | `EdgeInertialGS` | 上面 4 种 + `VertexGDir` + `VertexScale` | 9 | IMU 初始化优化 (含重力方向+尺度) | 初始化阶段专用因子图 |
 | `EdgeSim3ProjectXYZ` | `VertexSim3` + `VertexSBAPointXYZ` | 2 | 回环 Sim3 约束 | `BetweenFactor<Pose3>` (回环) |
 
@@ -1170,7 +1170,7 @@ Factor-VIO: "先验证, 后信任"
 | `CheckReplacedInLastFrame()` | `Tracking.cc:L1943` | LocalMapping 的 BA 替换了 MapPoint | 用新 MapPoint 替换 Tracking 中持有的旧指针 |
 | BA 内的 Huber 核 | `Optimizer.cc` 中 g2o edge 的 `setRobustKernel` | 重投影残差异常大 | Huber 降权异常观测, 在 BA 迭代中自然收敛或削弱 |
 | `SearchInNeighbors()` | `LocalMapping.cc:L108` | 新 KF 插入后, 与邻居 KF 融合重复 MapPoint | 合并同一物理点的多个 MapPoint |
-| `KeyFrameCulling()` | `LocalMapping.cc:L191` | 90% MapPoint 被其他 ≥3 KF 观测 | 剔除冗余 KF, 释放内存 |
+| `KeyFrameCulling()` | `LocalMapping.cc:L191` | 90%(视觉)/50%(双目惯性) MapPoint 被其他 ≥3 KF 观测 | 剔除冗余 KF, 释放内存 |
 
 **Factor-VIO 的事后补救**:
 
@@ -1528,10 +1528,13 @@ struct ProbeConfig {
 struct FrontendProbe {
     // 跟踪统计
     int klt_attempted=0, klt_success=0, klt_fb_failed=0, klt_aged_out=0;
-    // RANSAC统计
-    int r2d2d_inliers=0, r2d2d_outliers=0, r3d3d_inliers=0, r3d3d_outliers=0;
+    // RANSAC统计 (★新增: putatives+迭代数用于计算内点率)
+    int r2d2d_putatives=0, r2d2d_inliers=0, r2d2d_iters=0;
+    int r3d3d_putatives=0, r3d3d_inliers=0, r3d3d_iters=0;
     // 立体匹配
     int stereo_matched=0, stereo_failed_ncc=0, stereo_failed_disp=0;
+    // 右目关键点状态 (★新增)
+    int rkp_valid=0, rkp_no_depth=0, rkp_failed_arun=0;
     // 空间分布 (5×7网格, 均值/标准差; std/mean<0.5=均匀)
     int grid_counts[5][7];
     bool isUniform() { return stddev/mean < 0.5; }
@@ -1587,6 +1590,10 @@ struct BackendProbe {
     double build_ms=0, isam2_ms=0, slot_ms=0, post_ms=0;
     // 图大小
     int factors=0, variables=0, explicit_lmks=0;
+    // ★ Hessian稀疏度 (线性化因子图→Hessian→零元统计)
+    int hessian_elements=0, hessian_zeros=0;
+    // ★ 优化前后误差对比
+    double error_before=0, error_after=0;
 };
 ```
 
