@@ -115,6 +115,13 @@ function processFrame(stereo_image, imu_buffer, prev_state):
         cur_pts = calcOpticalFlowPyrLK(prev_left_gray, cur_left_gray,
                     prev_pts, winSize=(21,21), maxLevel=3, ...)  // 无USE_INITIAL_FLOW
 
+    // ===== PHASE 3b: 特征老化淘汰（Kimera-VIO: max_feature_track_age=25 KFs）=====
+    for each track_age in prev_track_ages:
+        if track_age > config.max_feature_track_age:  // 默认 25
+            status[track_idx] = false
+            prev_landmarks[track_idx] = -1
+    // 理由：长寿命特征积累漂移；强制淘汰迫使系统依赖新的、更准确的观测
+
     // ===== PHASE 4: 双向光流验证（VINS-Fusion模式） =====
     if config.forward_backward_check:
         back_pts, back_status = calcOpticalFlowPyrLK(
@@ -126,27 +133,77 @@ function processFrame(stereo_image, imu_buffer, prev_state):
                     norm(back_pts[i] - prev_pts[i]) < 0.5):
                 status[i] = false
 
-    // ===== PHASE 5: 边界外剔除 + F矩阵RANSAC外点剔除 =====
+    // ===== PHASE 5: 边界外剔除 + 2D-2D RANSAC =====
     status = status AND inBorder(cur_pts, img_size)
     cur_un_pts = undistort(cur_pts, camera)  // 去畸变到归一化平面
-    status = status AND fundamentalMatrixRANSAC(
+    // Kimera-VIO: 2-point mono (given IMU rot) or 5-point Nistér
+    //    ransac_threshold_mono = 1.0e-6 (bearing vector dot-product space)
+    //    ≈ 2.8px @ 460px focal
+    //    minNrMonoInliers = 10
+    //    ransac_probability = 0.995
+    status = status AND monocularRANSAC(
         prev_un_pts, cur_un_pts,
-        threshold=2.0/focal, confidence=0.999
-    )  // 参考 OpenVINS TrackKLT: F矩阵RANSAC, 2/f阈值
+        threshold=1.0e-6, minInliers=10, confidence=0.995,
+        givenRotation=imu_rotation_available ? predicted_R : std::nullopt
+    )
+    // ⚠️ 2D-2D 外点处理：永久标记 landmark=-1，不再进入后续处理
+    for i where !status[i]:
+        prev_landmarks[i] = -1
+        cur_landmarks[i] = -1
+
+    // ===== PHASE 5b: 3D-3D 立体RANSAC（关键：降级不删除！）=====
+    if config.stereo and config.stereo_ransac_enabled:
+        // 仅对有立体深度且在上个KF也有匹配的特征执行
+        // Kimera-VIO: 1-point voting (given IMU rot) or 3-point Arun
+        //    ransac_threshold_stereo = 1.0 (Mahalanobis squared, 3 DOF)
+        //    minNrStereoInliers = 5
+        //    stereo_pt_cov = I₃×₃ (1px std per axis in 3D space)
+        stereo_pts_ref, stereo_pts_cur, stereo_ids = []
+        for t in tracks_alive where t.has_stereo and t.hasObsInKeyframe(prev_kf):
+            pt3d = K_cam.inv() * t.normalized_pt * t.stereo_depth
+            stereo_pts_ref.append(t.prev_kf_3d)
+            stereo_pts_cur.append(pt3d)
+            stereo_ids.append(t.id)
+
+        if |stereo_pts_cur| >= 5:
+            inliers, best_T = onePointStereoRANSAC(
+                stereo_pts_ref, stereo_pts_cur, imu_rotation,
+                mahalanobisThreshold=1.0, minInliers=5)
+
+            // ⚠️ 关键：3D-3D 外点降级为单目，不删除！
+            // Kimera-VIO: removeOutliersStereo → FAILED_ARUN → uR=NaN
+            inlier_set = set(inliers)
+            for t in tracks_alive:
+                if t.id in stereo_ids and t.id not in inlier_set:
+                    t.stereo_3d3d_outlier = true  // 标记降级
+                    // t.has_stereo 保持 true！
+                    // 在 admission_quality 中 Q_stereo 打折处理
 
     // ===== PHASE 6: 压缩存活点 =====
     tracks_alive = compactByStatus(tracks_active, status)
     for t in tracks_alive:
         t.track_length++
 
-    // ===== PHASE 7: 补新特征 (Shi-Tomasi) =====
+    // ===== PHASE 7: 补新特征 (Shi-Tomasi) — 仅在关键帧时执行！ =====
+    // Kimera-VIO: featureDetection() 只在 shouldBeKeyframe()==true 时调用
+    // 非关键帧仅做 KLT 跟踪，不检测新特征
+    if not is_keyframe:
+        return tracks_alive  // 跳过特征补点
+
     n_need = max_features - |tracks_alive|
+    // Kimera-Euroc: 先提取 2000 个候选, ANMS/Binning 筛选到 300
+    n_raw = min(n_need * 6, 2000)  // 先大量提取，后 ANMS 筛选
     mask = buildSpatialMask(tracks_alive, min_dist_px)
     // 优先保留长跟踪点，半径MIN_DIST内禁止新特征（VINS setMask模式）
     if n_need > 0:
         new_pts = goodFeaturesToTrack(cur_left_gray,
-                    n_need, qualityLevel=0.01, minDistance=min_dist_px,
+                    n_raw, qualityLevel=0.001, minDistance=min_dist_px,
+                    // Kimera GFTT: qualityLevel=0.001（极低，先大量提取）
                     mask=mask)
+        // ANMS/Binning 空间均匀化 (Kimera Euroc: 7×5 Binning)
+        // vs 简单 grid mask: ANMS 按 response 排序选取，保留最强角点
+        new_pts = anmsBinning(new_pts, scores,
+                              n_need, grid_h=7, grid_w=5)
         // 亚像素精化 (cornerSubPix, 参考 open_vins Grider_FAST)
         cornerSubPix(cur_left_gray, new_pts, winSize=(5,5), zeroZone=(-1,-1),
                      criteria=(COUNT|EPS, 20, 0.001))

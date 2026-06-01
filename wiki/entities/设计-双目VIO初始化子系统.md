@@ -415,25 +415,40 @@ Values init_values:
 
 ### 5.2 PriorFactor 噪声模型
 
-| 先验 | GTSAM 因子 | Sigma 值 | 噪声模型 | 理由 |
-|------|-----------|---------|---------|------|
-| 首帧姿态 | `PriorFactor<Pose3>` | `(0.01, 0.01, 0.01, 0.05, 0.05, 0.001)` m/rad | `Diagonal::Sigmas` | 位置紧，roll/pitch 紧(静态)或中等(动态)，yaw 极紧 (固定 gauge) |
-| 首帧速度 | `PriorFactor<Vector3>` | **0.1 m/s** (静态)/**1.0 m/s** (动态) | `Isotropic::Sigma` | 静态下确信零速；动态下弱先验 |
-| 首帧偏置 (bg) | `PriorFactor<ConstantBias>` (bias 分量) | bg: **0.02 rad/s**, ba: **0.2 m/s²** | `Diagonal::Sigmas` | 中等先验，允许后续 VIO 优化 |
-| 首帧偏置 (ba) | `PriorFactor<ConstantBias>` (bias 分量) | **0.2 m/s²** | — | 弱先验 (加计偏置小但不可忽略) |
+> ⚠️ **关键教训**：先验值直接影响 SmartFactor 三角化质量。先验太松 → 首帧位姿不确定 → SmartFactor 三角化跑到相机后方（Cheirality 失败）。
 
-**姿态先验细粒度解释**（参考 Kimera-VIO 的坐标系区分）：
+| 先验 | Kimera-VIO 精确值 | 之前的推荐值 | 修正后的推荐值 | 差距与理由 |
+|------|------------------|-------------|--------------|-----------|
+| 首帧姿态 roll/pitch σ | **1e-5 rad** (YAML: 0.1745 rad) | 0.01 rad | **0.01 rad** (静态) / **0.17 rad** (动态) | 静态下比 Kimera YAML 更紧是安全的 (roll/pitch 由重力可观) |
+| 首帧姿态 yaw σ | **1.75e-3 rad** | 0.001 rad | **1.75e-3 rad** | 对齐 Kimera |
+| 首帧姿态 位置 σ | **1e-5 m** | 0.05 m | **1e-4 m** | Kimera 几乎锁死第一帧。>0.01m 会导致 SmartFactor 三角化跑到相机后方 |
+| 首帧速度 σ | **0.001 m/s** | 0.1 m/s (静态) | **0.001 m/s** (静态) / **1.0 m/s** (动态) | 你的静态值比 Kimera 松 **100×**，导致初期 IMU 传播偏 |
+| 首帧 gyro bias σ | **0.01 rad/s** | 0.02 rad/s | **0.01 rad/s** | 对齐 Kimera |
+| 首帧 acc bias σ | **0.1 m/s²** | 0.2 m/s² | **0.1 m/s²** | 对齐 Kimera |
+
+**Kimera-VIO 源码精确值**（`VioBackendParams.h:L110-L115` + `VioBackend.cpp:L1254-L1319`）：
 
 ```cpp
-// 世界系 → 机体系旋转的噪声: 在世界系中指定 roll/pitch/yaw 的不确定度
-// roll/pitch: 静态 σ=0.05 rad (~2.9°), 动态 σ=0.17 rad (~10°)
-// yaw: σ=0.001 rad (~0.06°) — 极紧先验固定 gauge freedom
-// 位置: σ=0.01 m (默认原点)
+// Kimera-VIO addInitialPriorFactors() — EXACT values:
+double initialPositionSigma_   = 1e-5;     // ← 5000× tighter than 0.05
+double initialRollPitchSigma_  = 1e-5;     // (YAML overrides to 0.1745)
+double initialYawSigma_        = 1.75e-3;
+double initialVelocitySigma_   = 1e-3;
+double initialAccBiasSigma_    = 0.1;
+double initialGyroBiasSigma_   = 0.01;
 
-Vector6 pose_sigmas = (is_static) ?
-    Vector6(0.01, 0.01, 0.01, 0.05, 0.05, 0.001) :   // 静态
-    Vector6(0.01, 0.01, 0.01, 0.17, 0.17, 0.001);     // 动态
-auto pose_noise = noiseModel::Diagonal::Sigmas(pose_sigmas);
+// Pose prior construction (note: covariance in BODY frame, see §11.1):
+Matrix6 pose_prior_covariance = Matrix6::Zero();
+pose_prior_covariance.diagonal()[0] = initialRollPitchSigma_²;   // roll
+pose_prior_covariance.diagonal()[1] = initialRollPitchSigma_²;   // pitch
+pose_prior_covariance.diagonal()[2] = initialYawSigma_²;         // yaw
+pose_prior_covariance.diagonal()[3] = initialPositionSigma_²;    // x
+pose_prior_covariance.diagonal()[4] = initialPositionSigma_²;    // y
+pose_prior_covariance.diagonal()[5] = initialPositionSigma_²;    // z
+
+// ⚠️ 关键：协方差从世界系旋转到 BODY 系 (L1277)
+pose_prior_covariance.topLeftCorner(3,3) =
+    B_Rot_W * pose_prior_covariance.topLeftCorner(3,3) * B_Rot_W.transpose();
 ```
 
 ### 5.3 路标因子约束
@@ -456,17 +471,24 @@ auto point_prior = noiseModel::Isotropic::Sigma(3, 0.5);      // σ=0.5 m (立�
 graph.add(PriorFactor<Point3>(L(lmk_id), Point3(X_w, Y_w, Z_w), point_prior));
 ```
 
-### 5.4 SmartFactor 禁用协议
+### 5.4 SmartFactor 策略：Kimera 的做法与你的选择
 
-初始化期间（前 `kInitKFCount` 个关键帧，默认 10）：
-- **禁止创建 SmartFactor**：前端传入的 `PendingLandmark` 全部以显式 `Point3` + `GenericStereoFactor3D` 注入图。
-- **禁止路标提升**：不做 SmartFactor → GenericStereoFactor 迁移。
-- **禁止异常值剔除**（后验 chi²）：初始化阶段保留所有观测，让先验和图结构自我约束。
+**Kimera-VIO 的做法**：初始化后**立即启用 SmartFactor**。没有"前 N 帧禁用"阶段。`initStateAndSetPriors()` 设置紧先验后直接进入 `BackendState::Nominal`，从 KF=1 开始就用 SmartStereoFactor。
 
-初始化完成后（`INITIALIZED` 状态）：
-- 新路标以 SmartFactor 试验期开始（参考 [[架构-GTSAM iSAM2 双目VIO后端设计]] 第 7 章）
-- 启用 SmartFactor → 显式路标的迁移路径
-- 启用后验异常值剔除（Huber + chi² 硬阈值）
+**Kimera 能这样做的原因**：首帧位置先验极紧（1e-5 m），位姿足够确定，SmartFactor 的三角化从第一帧就有稳定的参考系。
+
+**两种策略对比**：
+
+| | Kimera-VIO | 显式路标过渡方案 |
+|---|---|---|
+| SmartFactor 启用时机 | KF=1 立即启用 | 第 10 KF 后启用 |
+| 复杂度 | 低 | 高（需维护两套路标管理代码） |
+| 适用条件 | 首帧先验极紧（σ_pos ≤ 1e-4 m） | 首帧先验松或初始化质量不确定 |
+| 风险 | 先验不够紧 → 早期 SmartFactor 三角化失败 | 前 10 KF 显式路标的三角化质量依赖前端立体精度 |
+
+**推荐策略**：
+- 如果首帧先验设为 Kimera 级别（σ_pos = 1e-4 ~ 1e-5 m），可以**从 KF=1 就用 SmartFactor**，简化设计。
+- 如果首帧先验较松（测距不可靠、初始化不确定性大），保留前 10 KF 显式路标过渡。
 
 ---
 
@@ -639,6 +661,69 @@ graph.add(PriorFactor<Vector3>(V(0), Vector3::Zero(), strong_vel_noise)); // 弱
 | 陀螺随机游走 | `GYR_W` | **4.0e-6** rad/s²/√Hz | ADIS16448 (EuRoC) |
 | 加速度计随机游走 | `ACC_W` | **2.0e-4** m/s³/√Hz | ADIS16448 (EuRoC) |
 | 重力幅值 | `GRAVITY_MAG` | **9.81007** m/s² | 苏黎世 (EuRoC) |
+
+---
+
+## 8.5 约定陷阱与参数命名规范
+
+> ⚠️ 以下陷阱均来自 PHAD SLAM 实际调试中发现的问题——SmartFactor 三角化到相机后方、标定参数错位、先验量级错误。
+
+### 8.5.1 坐标系约定：`T_a_b` 的含义
+
+`T_a_b` = 将点从坐标系 **b** 变换到坐标系 **a** 的刚体变换（`Pose3`）。
+
+| 符号 | 含义 | 作为 `body_P_sensor` 时 | 验证 |
+|------|------|------------------------|------|
+| `T_w_b` | body→world 位姿 | — | `T_w_b * p_body = p_world` |
+| `T_b_cam` | camera→body 变换 | ✅ **正确** | `T_w_b * T_b_cam * p_cam = p_world` |
+| `T_cam_b` | body→camera 变换 | ❌ **错误！** | 反了会导致相机在 body 的另一侧 |
+
+**陷阱**：如果传 `T_cam_b`（body 在 camera 系中的位姿）而非 `T_b_cam`（camera 在 body 系中的位姿），SmartFactor 会用错误的相机位置做三角化，**所有 3D 点会跑到相机后方**。
+
+**GTSAM `SmartStereoProjectionPoseFactor` 的确切语义**（`body_P_sensor` 参数）：
+```
+camera_pose_world = body_pose_world * body_P_sensor
+→ body_P_sensor = T_body_camera  （相机在 body/IMU 系中的位姿）
+```
+
+**EuRoC 典型值**：左相机在 IMU 前方约 5cm，`T_b_cam = Pose3(Rot3(), Point3(0.05, 0.0, 0.0))`。
+
+### 8.5.2 GTSAM `Cal3_S2Stereo` 构造函数参数顺序
+
+GTSAM 有多个重载，容易传错参数：
+
+```cpp
+// 标准 6 参数构造:
+Cal3_S2Stereo(fx, fy, skew, u0, v0, baseline)
+
+// 便捷 4 参数构造（假设 fx=fy, skew=0）:
+Cal3_S2Stereo(fx, u0, v0, baseline)
+//              ↑    ↑   ↑    ↑
+//            焦距   cx  cy  基线
+
+// ❌ 常见错误：把 cx 当成 fy 传入
+Cal3_S2Stereo(K(0,0), K(0,2), K(1,2), baseline)
+//             fx      cx      cy      b
+// 四参数版本：fx      u0      v0      b  ← 正确
+// 六参数版本：fx      fy      skew    …  ← 如果 GTSAM 版本没有四参构造函数，
+//                                            cx 会被误读为 fy，cy 被误读为 skew
+```
+
+**验证方法**：构造后打印 `stereo_cal_->fy()` 和 `stereo_cal_->px()`，确保值合理（fy≈fx, px=cx）。
+
+### 8.5.3 先验 σ 的量级
+
+| 参数 | 过松的症状 | 过紧的症状 |
+|------|-----------|-----------|
+| 位置 σ > 0.01m | SmartFactor 三角化跑到相机后方（cheirality 失败） | 初始化后轨迹无法修正 |
+| 速度 σ > 0.1m/s | 初期 IMU 传播偏，bias 估计缓慢收敛 | 静止初始化后速度估计不更新 |
+| roll/pitch σ > 0.17rad | 重力方向估计偏，尺度漂移 | 无法适应重力修正 |
+
+**Kimera 的设计哲学**：首帧**极紧先验**给出稳定参考系，后续依赖 IMU 预积分 + SmartFactor 增量更新修正。松先验的设计（如 VINS-Fusion）依赖滑动窗口的批量重优化，不适用于 iSAM2 增量模式。
+
+### 8.5.4 iSAM2 增量模式下的"先验固定"
+
+iSAM2 的 IncrementalFixedLagSmoother 中，首次边缘化后产生的先验因子的线性化点**永久固定**。如果初始化阶段的先验设置不当（太松），这个错误会通过边缘化传播到整个估计窗口。详见 [[概念-Schur补与边缘化]] 和 DM-VIO 的延迟边缘化方案。
 
 ---
 

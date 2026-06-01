@@ -75,7 +75,8 @@ static constexpr SymbolChar kImuBiasSymbolChar = 'b';     // IMU偏置
 
 | # | 因子类型 | GTSAM 类 | 连接的变量 | 残差维度 | 噪声模型 | Sigma/协方差来源 | Huber 阈值 | 说明 |
 |---|---------|----------|-----------|---------|---------|-----------------|-----------|------|
-| 1 | IMU 预积分 | `CombinedImuFactor` | `x_i, v_i, b_i, x_j, v_j, b_j` | 15 (R3+V3+P3+Ba3+Bg3) | 预积分协方差逆矩阵 Cholesky | 艾伦方差标定 (`ACC_N`, `GYR_N`, `ACC_W`, `GYR_W`) | 不使用 | 连接相邻 KF 的高频运动约束 |
+| 1a | IMU 预积分 (Combined) | `CombinedImuFactor` | `x_i, v_i, b_i, x_j, v_j, b_j` | 15 | Cholesky(PIM_cov⁻¹) | ADIS16448 (Euroc) | 不使用 | bias 已嵌入因子 |
+| 1b | IMU 预积分 (分离) | `ImuFactor` + `BetweenFactor<ConstantBias>` | `x_i,v_i,x_j,v_j,b_i` + `b_i,b_j` | 9+6 | Cholesky(PIM_cov⁻¹) + `sqrt(dt)*RW` | ADIS16448 (Euroc) | 不使用 | **Kimera Euroc 默认**，bias walk 需手动添加 |
 | 2 | 双目视觉（Smart） | `SmartStereoProjectionPoseFactor` | `x_i, x_j, ...`（多帧位姿） | 2/观测（内部消元路标） | `Isotropic.Sigma(2, 1.0)` | 像素噪声 ~1.5 px | 内置动态拒绝阈值 3.0 | 路标隐式表示，多帧观测压缩为位姿约束 |
 | 3 | 双目视觉（显式） | `GenericStereoFactor3D` | `x_i, l_k` | 3 (uL, uR, v) | `Diagonal.Sigmas(px, px, px)` | 像素噪声 ~1.5 px | Huber(7.815) | 路标转为显式 Point3 后使用 |
 | 4 | 相对位姿约束 | `BetweenFactor<Pose3>` | `x_i, x_j` | 6 | `Diagonal.Sigmas(...)` | 旋转 ~0.1°, 平移 ~0.01m | Huber(1.0) | KF 间立体里程计约束（可选） |
@@ -147,22 +148,45 @@ covariance = F * covariance * F.transpose() + V * noise * V.transpose();
 
 ### 3.1 每关键帧的因子注入伪代码
 
-这是最关键的设计约束：**SmartFactor 必须在 IMU/先验因子之前加入，因为 iSAM2 需要前 N 个 slot 来追踪 SmartFactor 的位置。**
+这是最关键的设计约束：**SmartFactor 必须在 IMU/先验因子之前加入，因为 iSAM2 需要前 N 个 slot 来追踪 SmartFactor 的位置（1:1 对应）。**
 
 ```
 procedure onKeyframe(kf_id, imu_pim, stereo_measurements, landmarks_active):
-    // ===== 阶段 0: 状态初始化 =====
     kf_id += 1
     
-    // ===== 阶段 1: 写入新变量初值 =====
-    new_values.insert(x<kf_id>,  pose_prediction)   // 来自 IMU/视觉/PnP
-    new_values.insert(v<kf_id>,  velocity_prediction)
-    new_values.insert(b<kf_id>,  imu_bias_prediction)
+    // 阶段 1: 写入新变量初值
+    new_values.insert(x<kf_id>, pose_prediction)
+    new_values.insert(v<kf_id>, velocity_prediction)
+    new_values.insert(b<kf_id>, imu_bias_prediction)
     
-    // ===== 阶段 2: 添加 IMU 因子 =====
-    new_other_factors.add(CombinedImuFactor(
-        x<prev>, v<prev>, b<prev>, x<kf_id>, v<kf_id>, b<kf_id>, imu_pim
-    ))
+    // 阶段 2: 处理 SmartFactor（必须先于 IMU 因子！）
+    delete_slots = []
+    for each lmk_id in landmarks_active:
+        new_sf = clone_or_create_SmartFactor(lmk_id)  // Clone-and-add 模式
+        old_slot = old_smart_factor_slots[lmk_id]
+        
+        if old_slot != -1:         // 已在图中 → 删除旧 slot + 添加新
+            delete_slots.append(old_slot)
+            new_factors.append(new_sf)
+        else:                       // 首次入图
+            new_factors.append(new_sf)
+    
+    // 阶段 3: 添加 IMU 因子（注意：ImuFactor 需要额外 bias walk）
+    if imu_type == ImuFactor:                                     // Kimera Euroc 默认
+        new_factors.add(ImuFactor(x<prev>,v<prev>,x<kf_id>,v<kf_id>,b<prev>,pim))
+        new_factors.add(BetweenFactor<ConstantBias>(              // ← 容易遗漏！
+            b<prev>, b<kf_id>, zero_bias, sqrt(dt) * bias_random_walk))
+    else:  // CombinedImuFactor
+        new_factors.add(CombinedImuFactor(x<prev>,v<prev>,b<prev>,x<kf_id>,v<kf_id>,b<kf_id>,pim))
+    
+    // 阶段 4: 添加其他因子 (Prior/Between/Odometry...)
+    new_factors.add(other_factors...)
+    
+    // 阶段 5: update + slot 追踪
+    result = smoother->update(new_factors, new_values, timestamps, delete_slots)
+    for i, lmk_id in enumerate(smart_factor_order):
+        old_smart_factor_slots[lmk_id] = result.newFactorsIndices[i]
+        // ↑ 1:1 对应——这就是为什么 SmartFactor 必须排第一
     
     // ===== 阶段 3: 添加里程计因子（可选）=====
     if stereo_odometry_valid:
@@ -569,7 +593,50 @@ if postUpdateOutlierRejection(smoother) rejects a GenericStereoFactor:
 | 9 | **重线性化风暴** | CPU 飙升，实时性下降 | `relinearizeThreshold` 过小触发频繁重线性化 | 检查 `isam2.getRelinearized()` 频率 | 增大 `relinearizeThreshold` 到 0.05，或增大 `relinearizeSkip` 到 5 |
 | 10 | **初始化阶段参数未收敛** | 前 50 帧 RMSE 大，后续改善 | 尺度/重力/偏置在初始化后继续漂移 | 检查 `|g_est - g_true| > 0.1 m/s²` 或 `|bias - bias_prev| > 5e-4` | 延迟边缘化直到参数收敛，启用多级初始化（重力对齐→偏置估计→尺度细化） |
 
-### 9.2 恢复伪代码
+### 9.2 Kimera-VIO updateSmoother 完整恢复机制（14 种异常捕获）
+
+> 参考实现：`raw/codes/Kimera-VIO/src/backend/VioBackend.cpp:L1383-L1636`
+
+```
+procedure updateSmoother(new_factors, new_values, timestamps, delete_slots):
+    // 浅拷贝备份 iSAM2 状态（共享 factor shared_ptr，拷贝 Bayes Tree）
+    backup = shallow_copy(smoother)
+    
+    try:
+        result = smoother.update(new_factors, new_values, timestamps, delete_slots)
+        return true
+    
+    catch IndeterminantLinearSystemException:                      // 秩亏
+        // 在 first_key 和 nearbyVariable 的 pose/vel/bias 上添加 PriorFactor
+        // pose σ=(0.01rad, 0.1m), vel σ=0.1m/s, bias σ=从参数
+        nfg = new_factors + 6 PriorFactors
+        smoother = backup                           // ← 回滚
+        result = smoother.update(nfg, ...)           // ← 重试
+        if fails: return false
+    
+    catch CheiralityException | StereoCheiralityException:         // 路标在相机后方
+        counter_of_exceptions++                     // 最多 5 次递归
+        if counter > 5: return false
+        smoother = backup                           // ← 回滚
+        lmk = extractLandmarkKey(exception)
+        // cleanCheiralityLmk: 从 new_factors/new_values/timestamps/图中
+        //   删除该路标的全部因子
+        cleaned = cleanCheiralityLmk(lmk, new_factors, new_values, timestamps, delete_slots)
+        return updateSmoother(cleaned)               // ← 递归调用
+    
+    catch InvalidNoiseModel | InvalidMatrixBlock | InvalidDenseElimination |
+          InvalidArgumentThreadsafe | ValuesKeyDoesNotExist | CholeskyFailed |
+          RuntimeErrorThreadsafe | OutOfRangeThreadsafe |
+          std::out_of_range | std::exception | ...:   // 其余 12 种异常
+        printSmootherInfo(...)                       // 打印完整诊断信息
+        return false
+
+## 关键设计要点：
+## 1. 备份是浅拷贝——共享 factor shared_ptr，拷贝 iSAM2 Bayes Tree 内部状态
+## 2. Cheirality 递归限制为 5 次（FLAGS_max_number_of_cheirality_exceptions）
+## 3. 所有异常都打印 smoother 信息——这是调试的关键设施
+## 4. IndeterminantLinearSystem 先在首帧 + 异常帧加 prior 再重试
+##   （你的实现缺少这个完整恢复链，一次异常就崩溃）
 
 ```
 procedure handleOptimizationFailure(smoother, error):
