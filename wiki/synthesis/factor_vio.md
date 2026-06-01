@@ -672,35 +672,56 @@ Kimera-VIO 从 KF=1 立即启用 SmartFactor，无需"前N帧禁用"阶段。前
 
 ### 5.2 因子类型
 
-> ⚠️ 标注说明: 🏷️ = Kimera-VIO 默认已有, ✨ = Factor-VIO 新增
+> ⚠️ 标注: 🏷️ = Kimera-VIO `VioBackend.cpp` 源码中有, ✨ = Factor-VIO 新增, ❌ = Kimera-VIO 有但本方案不需要
 
-| # | 来源 | 因子 | GTSAM 类 | 连接 | 噪声模型 | 鲁棒核 |
-|---|------|------|---------|------|---------|--------|
-| 1 | 🏷️ | IMU预积分 | `ImuFactor` | `X(i-1),V(i-1),X(i),V(i),B(i-1)` | Cholesky(PIM_cov⁻¹) | 无 |
-| 1b | 🏷️ | Bias随机游走 | `BetweenFactor<ConstantBias>` | `B(i-1),B(i)` | `sqrt(dt)*RW·I₆` | 无 |
-| 2 | 🏷️ | 隐式视觉 | `SmartStereoProjectionPoseFactor` | `X(t₁),X(t₂),...` | `Isotropic(3, 3.0)` | 内置3σ拒绝 |
-| 3 | ✨ | 显式视觉 (路标晋升后) | `GenericStereoFactor<Pose3,Point3>` | `X(k), L(id)` | `Isotropic(3, 1.5)` | Huber(7.815) |
-| 4 | 🏷️ | 首帧位姿 | `PriorFactor<Pose3>` | `X(0)` | `Diag(1e-5,1e-5,1.75e-3, 1e-5³)` | 无 |
-| 5 | 🏷️ | 首帧速度 | `PriorFactor<Vector3>` | `V(0)` | `Isotropic(3, 1e-3)` | 无 |
-| 6 | 🏷️ | 首帧偏置 | `PriorFactor<ConstantBias>` | `B(0)` | `Diag(0.1³, 0.01³)` | 无 |
-| 7 | 🏷️ | 边缘化先验 | `LinearContainerFactor` | 被边缘化的变量群 | (Schur补自动生成) | 无 |
-| 8 | 🏷️ | 回环 | `BetweenFactor<Pose3>` | `X(i), X(j)` | PnP内点分布估计 | Huber(1.345) |
-| — | 🏷️ | 零速先验 | `PriorFactor<Vector3>` | `V(k)` (LOW_DISPARITY时) | `Isotropic(3, 0.032)` | 无 |
-| — | 🏷️ | 静止约束 | `BetweenFactor<Pose3>` | `X(i-1),X(i)` (LOW_DISPARITY时) | `Diag(10000,10000,10000,1000³)` | 无 |
-| — | 🏷️ | 立体里程计 | `BetweenFactor<Pose3>` | `X(i-1),X(i)` | config决定 (默认关闭) | 无 |
+#### 5.2.1 视觉因子
 
-**关键澄清**:
+| # | 来源 | GTSAM 类 | Kimera 创建位置 | 连接 | 噪声 | 何时使用 | Factor-VIO? |
+|---|------|----------|---------------|------|------|---------|------------|
+| V1 | 🏷️ | `SmartStereoProjectionPoseFactor` | `L489`: `new SmartStereoFactor(noise, params, T_b_cam)` | `X(t₁)...X(tₙ)` (多帧位姿) | `Isotropic(3, 3.0)` | **每 KF**,所有路标 | ✅ SmartFactor 试用期 |
+| V2 | ✨ | `GenericStereoFactor<Pose3,Point3>` | 不存在于默认 VioBackend; RegularVioBackend `L836` | `X(k), L(id)` | `Isotropic(3, 1.5)` | SmartFactor 晋升后 | ✅ 显式路标 |
 
-1. **Kimera-VIO 默认 VioBackend 不使用 `GenericStereoFactor`**——它只有 `SmartStereoProjectionPoseFactor` 作视觉因子, 路标始终是隐式的。`GenericStereoFactor` 仅存在于 `RegularVioBackend` 子类中, 用于 Mesh 重建时将 SmartFactor 转为显式投影因子。
+#### 5.2.2 IMU 因子
 
-2. **Factor-VIO 新增了 `GenericStereoFactor<Pose3,Point3>`**——这是本文档的核心设计决策: 让通过试用期的路标获得显式的 `Point3` 状态变量, 参与 iSAM2 BA 迭代优化。动机来源于:
-   - RegularVioBackend 的 `addProjectionFactor()` (`RegularVioBackend.cpp:L825`) 展示的 SmartFactor→显式转换模式
-   - ORB-SLAM3 的 `MapPoint` 作为 g2o `VertexSBAPointXYZ` 参与 Local BA
-   - PHAD PFB 后端的显式路标设计 (曾达到 0.09m RMSE)
+| # | 来源 | GTSAM 类 | Kimera 创建位置 | 连接 | 噪声 | 何时使用 | Factor-VIO? |
+|---|------|----------|---------------|------|------|---------|------------|
+| I1 | 🏷️ | `ImuFactor` | `L926`: `emplace_shared<ImuFactor>` | `X(i-1),V(i-1),X(i),V(i),B(i-1)` | Cholesky(PIM_cov⁻¹) | Euroc 默认 (`imu_type=1`) | ✅ 推荐 |
+| I2 | 🏷️ | `CombinedImuFactor` | `L915`: `emplace_shared<CombinedImuFactor>` | `X(i-1),V(i-1),B(i-1),X(i),V(i),B(i)` | Cholesky(PIM_cov⁻¹) | `imu_type=0` 时 | 备选 |
+| I3 | 🏷️ | `BetweenFactor<ConstantBias>` | `L953`: bias 随机游走 | `B(i-1),B(i)` (零增量) | `sqrt(dt)*diag(acc_w², gyr_w²)` | **仅 ImuFactor 模式** | ✅ 配合 I1 |
 
-3. **`LinearContainerFactor`** 不是用户手动添加的——它是 iSAM2 边缘化(Schur 补)后自动生成的先验因子。在 Kimera-VIO 中出现在 `updateSmoother() catch CheiralityException` 的 `cleanCheiralityLmk` 分支和 `marginalize()` 后。
+#### 5.2.3 先验因子
 
-4. **`PointPlaneFactor`** 仅用于地面/墙面等结构规律约束, Factor-VIO 暂不需要。
+| # | 来源 | GTSAM 类 | Kimera 创建位置 | 连接 | 噪声 | 何时使用 | Factor-VIO? |
+|---|------|----------|---------------|------|------|---------|------------|
+| P1 | 🏷️ | `PriorFactor<Pose3>` | `L1285`: 首帧; `L1448`: 异常恢复 | `X(0)` / `X(nearby)` | `Diag(1e-5,1e-5,1.75e-3,1e-5³)` | 初始化时 + IndeterminantLinearSystem 恢复时 | ✅ |
+| P2 | 🏷️ | `PriorFactor<Vector3>` | `L1296`: 首帧; `L1012`: 零速; `L1470`: 恢复 | `V(0)` / `V(k)` | `Isotropic(3,1e-3)` (首帧) / `Isotropic(3,0.032)` (零速) | 初始化时 + LOW_DISPARITY 时 + 恢复时 | ✅ |
+| P3 | 🏷️ | `PriorFactor<ConstantBias>` | `L1313`: 首帧; `L1460`: 恢复 | `B(0)` / `B(nearby)` | `Diag(0.1³,0.01³)` | 初始化时 + 恢复时 | ✅ |
+| P4 | 🏷️ | `LinearContainerFactor` | iSAM2 边缘化自动生成 | 被边缘化的变量群 | Schur 补自动计算 | 每次边缘化老变量后 | ✅ (自动) |
+| P5 | ❌ | `PriorFactor<Point3>` | RegularVioBackend (L2032 打印) | `L(id)` | — | 仅在 RegularVioBackend 中用于路标先验 | ❌ |
+
+#### 5.2.4 相对约束因子
+
+| # | 来源 | GTSAM 类 | Kimera 创建位置 | 连接 | 噪声 | 何时使用 | Factor-VIO? |
+|---|------|----------|---------------|------|------|---------|------------|
+| R1 | 🏷️ | `BetweenFactor<Pose3>` | `L984`: 立体 RANSAC | `X(i-1),X(i)` | `Diag(0,0,0, 100,100,100)` (精密) | `addBetweenStereoFactors_=true` 且立体跟踪 VALID 时 | 可选 (默认关) |
+| R2 | 🏷️ | `BetweenFactor<Pose3>` | `L997`: 静止约束 | `X(i-1),X(i)` (Identity) | `Diag(10000,10000,10000, 1000,1000,1000)` (精密) | LOW_DISPARITY 时 (`kfTrackingStatus_mono_==LOW_DISPARITY`) | ✅ |
+| R3 | 🏷️ | `BetweenFactor<Vector3>` | `L1326`: 匀速先验 | `V(i-1),V(i)` (零增量) | `Diag(100,100,100)` (精密) | **已被注释掉,从未调用** | ❌ |
+| R4 | 🏷️ | `BetweenFactor<Pose3>` | `L407`: 外部里程计 | `X(i-1),X(i)` | 来自 `OdometryParams` (精密) | 有外部里程计且精度>0 时 | 可选 |
+| R5 | ✨ | `BetweenFactor<Pose3>` | 回环线程注入 | `X(i), X(j)` | 从 PnP 内点分布估计 | 回环检测成功后 | ✅ |
+
+#### 5.2.5 速度因子
+
+| # | 来源 | GTSAM 类 | Kimera 创建位置 | 连接 | 噪声 | 何时使用 | Factor-VIO? |
+|---|------|----------|---------------|------|------|---------|------------|
+| S1 | 🏷️ | `PriorFactor<Vector3>` | `L1012` (零速) | `V(k)` (零) | `Diag(1000,1000,1000)` (精密≈0.032m/s) | LOW_DISPARITY 且 `zero_velocity_precision_>0` | ✅ |
+| S2 | 🏷️ | `PriorFactor<Vector3>` | `L1027` (外部里程计速度) | `V(k)` | 来自 `OdometryParams.velocityPrecision_` | 有外部里程计速度时 | 可选 |
+
+#### 5.2.6 RegularVioBackend 专属 (Factor-VIO 暂不需要)
+
+| # | GTSAM 类 | 用途 |
+|---|---------|------|
+| — | `PointPlaneFactor` | 路标到平面的距离约束 (结构规律) |
+| — | `PriorFactor<OrientedPlane3>` | 平面先验 (如地面法向) |
 
 ### 5.3 每关键帧完整后端处理流程 (optimize)
 
