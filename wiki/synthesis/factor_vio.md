@@ -683,17 +683,274 @@ Kimera-VIO 从 KF=1 立即启用 SmartFactor，无需"前N帧禁用"阶段。前
 | 6 | 首帧偏置 | `PriorFactor<ConstantBias>` | `B(0)` | `Diag(0.1³, 0.01³)` | 无 |
 | 7 | 回环 | `BetweenFactor<Pose3>` | `X(i), X(j)` | PnP内点分布估计 | Huber(1.345) |
 
-### 5.3 每关键帧因子注入顺序 (强制约束)
+### 5.3 每关键帧完整后端处理流程 (optimize)
+
+参考 Kimera-VIO `VioBackend::optimize()` (`VioBackend.cpp:L1036-L1220`) 的精确实现。
 
 ```
-1. SmartFactor列表        ← 必须先于IMU! (slot恢复依赖1:1对应)
-2. IMU预积分因子          ← ImuFactor 或 CombinedImuFactor
-3. Bias随机游走因子       ← 仅ImuFactor模式需要
-4. 显式视觉因子            ← GenericStereoFactor3D (仅EXPLICIT+STABLE路标)
-5. 新晋升路标+变量         ← PROMOTING → EXPLICIT转换
-6. 回环因子               ← 回环线程注入 (仅检测到回环时)
-7. 其他因子               ← No-Motion, Zero-Velocity, Between-Stereo等
+function optimize(timestamp_kf_nsec, cur_id, max_extra_iterations, extra_delete_slots):
+    // ===== 阶段 0: 构建新因子图 =====
+    delete_slots = extra_delete_slots          // 子类可注入额外删除槽位
+    
+    // 遍历所有更新后的 SmartFactor (new_smart_factors_)
+    for each (lmk_id, new_sf) in new_smart_factors_:
+        old_entry = old_smart_factors_[lmk_id]       // 查找旧记录
+        old_slot = old_entry.second                   // -1 = 首次入图
+        
+        if old_slot != -1:                            // 已在图中
+            DCHECK(smoother->getFactors().exists(old_slot))
+            delete_slots.push_back(old_slot)           // 标记旧槽位删除
+            new_factors_tmp.push_back(new_sf)          // 加入新SmartFactor
+            lmk_ids_tmp.push_back(lmk_id)
+        elif not smoother->getFactors().exists(old_slot):
+            // 超出时间窗口 → 清理
+            old_smart_factors_.erase(lmk_id)
+            deleteLmkFromFeatureTracks(lmk_id)
+        else:                                         // 首次入图
+            new_factors_tmp.push_back(new_sf)
+            lmk_ids_tmp.push_back(lmk_id)
+    
+    // ⚠️ SmartFactor 必须排第一, IMU/Prior 因子排后面
+    // 理由: iSAM2 返回的 newFactorsIndices 与输入顺序 1:1 对应
+    new_factors_tmp.push_back(new_imu_prior_and_other_factors_)
+    
+    // ===== 阶段 1: 时间戳映射 =====
+    key_frame_count = {}                              // Key → Double
+    for each (key, value) in new_values_:
+        key_frame_count[key] = cur_id                 // 用当前KF ID作为时间戳
+    // IncrementalFixedLagSmoother 基于时间戳决定边缘化:
+    //   时间戳 < max_timestamp - smootherLag → 被边缘化
+    //   即: cur_id - key_timestamp > lag_states → 老变量被边缘化
+    
+    // ===== 阶段 2: iSAM2 增量更新 =====
+    result = updateSmoother(&result, new_factors_tmp, new_values_,
+                            key_frame_count, delete_slots)
+    // updateSmoother 内部:
+    //   backup = shallow_copy(smoother)
+    //   try: smoother->update(new_factors, new_values, timestamps, delete_slots)
+    //   catch IndeterminantLinearSystem: 注入priors + 回滚 + 重试
+    //   catch CheiralityException: cleanCheiralityLmk + 回滚 + 递归(最多5次)
+    
+    if not result: return false
+    
+    // ===== 阶段 3: 恢复 SmartFactor 槽位映射 =====
+    // result.newFactorsIndices: 每个新因子的槽位索引 (与new_factors_tmp 1:1)
+    updateNewSmartFactorsSlots(lmk_ids_tmp, old_smart_factors_, result)
+    // 内部: old_smart_factors_[lmk_id].second = result.newFactorsIndices[i]
+    
+    // ===== 阶段 4: 更新状态 + 清理 =====
+    state_ = smoother->calculateEstimate()
+    updateStates(cur_id)                             // 从state_提取 X/V/B
+    new_smart_factors_.clear()                       // 消耗完毕
+    new_imu_prior_and_other_factors_.resize(0)       // 消耗完毕
+    
+    // ===== 阶段 5: 重复迭代 (如果 max_extra_iterations > 1) =====
+    for n_iter = 1..max_extra_iterations:
+        // 用更新后的状态重新线性化
+        result = updateSmoother(&result)
+        // Kimera: numOptimize=1 (Euroc YAML), 即不做额外迭代
+    
+    // ===== 阶段 6: 后处理统计 =====
+    postDebug(total_start_time)                       // 计算优化前后误差对比
+    computeSmartFactorStatistics()                    // 统计退化/远点/异常值
+    
+    return true
 ```
+
+**关键数据结构**：
+
+```cpp
+// SmartFactor 槽位追踪 (VioBackend.h)
+using Slot = long int;                              // -1=未入图, >=0=槽位
+using SmartFactorMap = FastMap<LandmarkId,
+    pair<SmartStereoFactor::shared_ptr, Slot>>;
+
+// 成员变量
+SmartFactorMap old_smart_factors_;                  // 已在图中的SmartFactor
+LandmarkIdSmartFactorMap new_smart_factors_;        // 本轮新/更新的SmartFactor
+NonlinearFactorGraph new_imu_prior_and_other_factors_; // IMU/Prior/其他
+Values new_values_;                                 // 新变量初值
+Values state_;                                      // 当前优化后的状态
+```
+
+### 5.3a 后端处理流程与 ORB-SLAM3 LocalMapping 的对照
+
+ORB-SLAM3 没有 iSAM2 增量优化，它的 LocalMapping 线程是**批量处理**模式。两者架构差异如下：
+
+| 维度 | Factor-VIO (iSAM2 增量) | ORB-SLAM3 LocalMapping (批量) |
+|------|------------------------|------------------------------|
+| 优化触发 | 每个 KF 触发一次 `isam2.update()` | 空闲时处理队列中所有 KF |
+| 路标管理 | SmartFactor 隐式 + GenericStereoFactor 显式 | MapPoint 显式对象 + 引用计数 + BA |
+| 路标剔除 | chi² 后验 + SmartFactor 内部拒绝 | `MapPointCulling()`: found_ratio<0.25 或 创建2KF后观测≤3 |
+| 三角化 | SmartFactor 隐式 / 晋升时显式 | `CreateNewMapPoints()`: KF 间 ORB 匹配 + 视差检查 |
+| BA | iSAM2 增量自动处理 | `LocalBundleAdjustment()` / `LocalInertialBA()` 显式调用 |
+| 冗余 KF 剔除 | 边缘化自动处理 | `KeyFrameCulling()`: 90% 观测被其他 KF 覆盖则剔除 |
+| IMU 初始化 | 初始化阶段完成后开始 | `InitializeIMU()`: 在 LocalMapping 线程中渐进初始化 |
+
+**ORB-SLAM3 LocalMapping::Run() 的精确循环** (`LocalMapping.cc:L75-L195`):
+
+```
+while true:
+    if CheckNewKeyFrames():                    // 有新KF在队列中
+        ProcessNewKeyFrame()                    // BoW转换 + 插入Map + 更新共视图
+        MapPointCulling()                       // 剔除近期添加的坏MapPoint
+        CreateNewMapPoints()                    // 与邻居KF三角化新MapPoint
+        if not CheckNewKeyFrames():            // 队列空了 → 可以做BA
+            SearchInNeighbors()                 // 在邻居KF中融合重复MapPoint
+            
+            if KeyFramesInMap > 2:
+                if Inertial and IMU_initialized:
+                    dist = 最近两KF的相机位移
+                    if dist > 0.05: mTinit += dt
+                    if not IniertialBA2 and mTinit<10s and dist<0.02:
+                        ResetActiveMap()        // 运动不足 → 重置
+                    LocalInertialBA(currentKF)  // 20+ KF + 100+路标
+                else:
+                    LocalBundleAdjustment(currentKF)
+            
+            if not IMU_initialized and Inertial:
+                InitializeIMU(1e2, 1e5, true)   // 双目: prior_bias=1e2, prior_scale=1e5
+            
+            KeyFrameCulling()                    // 剔除冗余KF
+    else:
+        usleep(3000)                            // 3ms 休眠
+```
+
+**ORB-SLAM3 MapPointCulling() 的精确条件** (`LocalMapping.cc:L346-L385`):
+
+```
+function MapPointCulling():
+    for each pMP in mlpRecentAddedMapPoints:
+        if pMP->isBad():                                    // 已标记坏点 → 删除
+        elif pMP->GetFoundRatio() < 0.25:                   // 预测可见中实际找到<25%
+            pMP->SetBadFlag()                                // → 标记坏点(不立即删,等BA)
+        elif (nCurrentKFid - pMP->mnFirstKFid) >= 2         // 创建≥2KF后
+             and pMP->Observations() <= nThObs:             // 且观测≤3(双目)/2(单目)
+            pMP->SetBadFlag()
+        // 创建≥3KF后移出检查列表 (已充分验证或已被剔除)
+```
+
+**关键差异总结**：
+
+1. **ORB-SLAM3 的 MapPoint 是显式的**——有 `SetBadFlag()` / `Replace()` / `isBad()` 生命周期，BA 优化其 3D 位置。Factor-VIO 中对应的是显式路标 (STABLE/EXPLICIT 状态)。
+
+2. **ORB-SLAM3 的三角化是 KF 间批量操作** (`CreateNewMapPoints`)——从共视图中选前 10-30 个邻居 KF，做 ORB 匹配 + 视差检查 + 三角化。Factor-VIO 中对应的是 SmartFactor 的隐式三角化 + SVO Pro 深度滤波器。
+
+3. **ORB-SLAM3 的 BA 是显式调用**——`LocalBundleAdjustment` (仅视觉) / `LocalInertialBA` (视觉+IMU)。Factor-VIO 中 iSAM2 自动完成等价的增量优化。
+
+4. **ORB-SLAM3 的 `KeyFrameCulling`** 在 Factor-VIO 中没有直接对应——边缘化自动处理。但如果需要手动清理，可参考 ORB-SLAM3 的 90% 冗余观测阈值。
+
+### 5.3b 后端与 ORB-SLAM3 Tracking 线程的对照
+
+ORB-SLAM3 的 Tracking 线程是**逐帧**处理，与 LocalMapping **异步**。Factor-VIO 中 Tracking 和 LocalMapping 也在不同线程。
+
+**ORB-SLAM3 Tracking::Track() 精确流程** (`Tracking.cc:L1794-L2332`):
+
+```
+function Track():
+    // ===== 0: 预处理 =====
+    if LocalMapper has mbBadImu flag:                       // LocalMapping 检测到IMU异常
+        ResetActiveMap(); return
+    
+    // 时间戳异常检测
+    if last_timestamp > current_timestamp:                  // 时间戳倒流
+        CreateMapInAtlas(); return                           // 创建新地图
+    if dt > 1.0s:                                           // 时间戳跳跃>1s
+        if IMU_initialized: CreateMapInAtlas()              // 创建新地图
+        else: ResetActiveMap()                               // 重置
+    
+    // ===== 1: IMU 预积分 (每帧, KF间累积) =====
+    if Inertial and not first_frame:
+        PreintegrateIMU()
+        // 双目模式: mpImuPreintegratedFromLastKF 在 KF 间累积
+        //            mCurrentFrame.mpImuPreintegratedFrame 帧间IMU
+    
+    // ===== 2: 状态机驱动的跟踪策略 =====
+    switch mState:
+        case NOT_INITIALIZED:
+            StereoInitialization()                           // 双目: ≥500特征→直接初始化
+            // 双目初始化: 立体匹配→3D点→创建初始Map和KF→mState=OK
+        
+        case OK:
+            CheckReplacedInLastFrame()                       // LocalMapping可能替换了MapPoint
+            if velocity_valid and IMU_initialized:
+                bOK = TrackWithMotionModel()                 // 用mVelocity预测+投影匹配
+            else:
+                bOK = TrackReferenceKeyFrame()               // BoW加速的参考KF匹配
+            
+            if not bOK:
+                if KFs_in_map > 10:
+                    mState = RECENTLY_LOST                   // 短期丢失
+                else:
+                    mState = LOST                            // 长期丢失
+        
+        case RECENTLY_LOST:
+            if IMU_initialized:
+                PredictStateIMU()                            // IMU传播预测当前位姿
+            bOK = Relocalization()                           // DBoW2全局重定位
+            if bOK: mState = OK
+        
+        case LOST:
+            if KFs_in_map <= 10: ResetActiveMap()            // 早期丢失→重置
+            else: CreateMapInAtlas()                          // 创建新地图(保留旧地图)
+    
+    // ===== 3: 局部地图跟踪 (位姿精化) =====
+    if bOK:
+        bOK = TrackLocalMap()                                // 投影局部地图点到当前帧
+        //   → 更多2D-3D匹配 → motion-only BA (仅优化当前帧位姿,固定MapPoint)
+    
+    // ===== 4: 速度模型更新 =====
+    if bOK:
+        mVelocity = T_cur_wc * T_last_cw                     // SE3速度
+        mbVelocity = true
+    
+    // ===== 5: 关键帧决策 =====
+    if bOK:
+        if NeedNewKeyFrame():
+            CreateNewKeyFrame()
+            // → 插入 LocalMapping 队列
+    
+    // ===== 6: 异常值处理 =====
+    if bOK:
+        for each MapPoint in current_frame:
+            if Observations < 1:
+                mvbOutlier[i] = false; mvpMapPoints[i]=NULL  // 清理孤立观测
+        DeleteTemporalPoints()                               // 清理临时三角化点
+    
+    // ===== 7: 丢失恢复 =====
+    if mState == LOST:
+        if KFs_in_map <= 10: ResetActiveMap()
+        elif not IMU_initialized: ResetActiveMap()
+        else: CreateMapInAtlas()                             // Atlas 多地图机制
+    
+    mLastFrame = Frame(mCurrentFrame)                        // 深拷贝当前帧为下一帧的上帧
+```
+
+**IMU 预测位姿** (`Tracking.cc:L1746-L1786`):
+
+```cpp
+// 从上一关键帧预测当前位姿 (IMU预积分)
+Rwb2 = NormalizeRotation(Rwb1 * pim->GetDeltaRotation(bias_lastKF));
+twb2 = twb1 + Vwb1*dt + 0.5*dt²*Gravity + Rwb1*pim->GetDeltaPosition(bias_lastKF);
+Vwb2 = Vwb1 + dt*Gravity + Rwb1*pim->GetDeltaVelocity(bias_lastKF);
+// Gravity = (0, 0, -9.81) 在 World 系中
+
+// 或从上一帧预测 (帧间IMU)
+Rwb2 = NormalizeRotation(Rwb1 * pim_frame->GetDeltaRotation(bias_lastFrame));
+twb2 = twb1 + Vwb1*dt + 0.5*dt²*Gravity + Rwb1*pim_frame->GetDeltaPosition(bias_lastFrame);
+Vwb2 = Vwb1 + dt*Gravity + Rwb1*pim_frame->GetDeltaVelocity(bias_lastFrame);
+```
+
+**ORB-SLAM3 状态机与 Factor-VIO 对照**：
+
+| ORB-SLAM3 Tracking 状态 | Factor-VIO 对应 |
+|------------------------|-----------------|
+| `NO_IMAGES_YET` | `UNINITIALIZED` |
+| `NOT_INITIALIZED` | `STATIC_CHECK → STATIC_INIT` / `DYNAMIC_CHECK → DYNAMIC_INIT` |
+| `OK` | `NOMINAL` (正常跟踪) |
+| `RECENTLY_LOST` | 跟踪质量下降 → 增大特征检测 + KLT降级策略 |
+| `LOST` | 重定位 (全量ORB + DBoW3 + PnP) 或 重新初始化 |
+| Atlas 多地图 | 单地图模式(简化); 或 RF2-Atlas 模式 |
 
 ### 5.4 iSAM2参数配置
 
