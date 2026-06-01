@@ -1155,7 +1155,34 @@ Factor-VIO: "先验证, 后信任"
 | 弱纹理场景 (MH) | ORB 特征不足 → 三角化困难 → 路标数量少 → BA 约束弱 | KLT 在弱纹理下跟踪困难 → SmartFactor 退化率高 → 晋升率低 |
 | 快速旋转 | ORB 匹配困难 → 路标创建少 | IMU 预测 KLT → 跟踪成功率高于 ORB 匹配 |
 
-#### 六、优劣势总结
+#### 六、事后补救机制对比
+
+**ORB-SLAM3 的事后补救**:
+
+| 机制 | 位置 | 触发条件 | 动作 |
+|------|------|---------|------|
+| `MapPointCulling()` | `LocalMapping.cc:L346` | found_ratio<0.25 或 创建≥2KF后观测≤3 | `SetBadFlag()` — 标记坏点, BA 不再使用 |
+| `CheckReplacedInLastFrame()` | `Tracking.cc:L1943` | LocalMapping 的 BA 替换了 MapPoint | 用新 MapPoint 替换 Tracking 中持有的旧指针 |
+| BA 内的 Huber 核 | `Optimizer.cc` 中 g2o edge 的 `setRobustKernel` | 重投影残差异常大 | Huber 降权异常观测, 在 BA 迭代中自然收敛或削弱 |
+| `SearchInNeighbors()` | `LocalMapping.cc:L108` | 新 KF 插入后, 与邻居 KF 融合重复 MapPoint | 合并同一物理点的多个 MapPoint |
+| `KeyFrameCulling()` | `LocalMapping.cc:L191` | 90% MapPoint 被其他 ≥3 KF 观测 | 剔除冗余 KF, 释放内存 |
+
+**Factor-VIO 的事后补救**:
+
+| 机制 | 触发条件 | 动作 |
+|------|---------|------|
+| **chi² 后验异常值剔除** (§3.5) | 显式路标 `chi² > 7.815` (χ²₃, p=0.05) | 标记异常; 连续 3 帧 → `CULLED` |
+| **`REMEDIATING` 状态** (§1.3 路标状态机) | 显式路标偶发异常 | 允许恢复: 若后续 chi² 连续通过 → 回到 `STABLE`; 若持续异常 → `CULLED` |
+| **SmartFactor 内部异常值拒绝** | `DynamicOutlierRejectionThreshold=3.0` | 3σ 外重投影观测被 SmartFactor 内部拒绝, 不参与隐式三角化 |
+| **`prunePostUpdateOutlierObservations`** | chi² 后验发现异常观测 | 重建 SmartFactor (移除异常观测) 或降级为 CULLED |
+| **退化检测 (SmartFactor)** | `isDegenerate()==true` | ZERO_ON_DEGENERACY 模式: 退化路标的 Jacobian 归零, 不影响位姿优化 |
+| **updateSmoother Cheirality 恢复** (§5.6) | 路标三角化到相机后方 | 递归删除该路标全部因子 + 回滚 iSAM2 + 重试 (最多 5 次) |
+
+**两者的关键差异**:
+
+- ORB-SLAM3 的事后补救**发生在 BA 之内** (Huber 核在优化迭代中起作用) 和**BA 之外** (MapPointCulling 事后剔除)。路标始终参与 BA。
+- Factor-VIO 的事后补救**发生在 iSAM2 更新之后** (chi² 检验, REMEDIATING)。试用期路标不参与 BA 但 SmartFactor 内部有统计拒绝。晋升后的显式路标有完整的 chi² 监测+恢复路径。
+- ORB-SLAM3 在路标质量差时**降权**（Huber 减小残差权重），Factor-VIO 在路标质量差时**先降级再考察**（REMEDIATING → 恢复或剔除）。
 
 **ORB-SLAM3 显式路标的优势**:
 1. **BA 可修正初值错误**——路标 3D 位置在批量 LM 迭代中不断精化
