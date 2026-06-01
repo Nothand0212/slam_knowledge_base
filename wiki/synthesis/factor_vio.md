@@ -1,6 +1,6 @@
 ---
 created: 2026-06-01
-updated: 2026-06-01
+updated: 2026-06-02
 type: synthesis
 tags: [stereo-vio, factor-graph, GTSAM, iSAM2, SmartFactor, 方案设计, factor-vio]
 sources:
@@ -21,6 +21,37 @@ sources:
 
 > 综合 Kimera-VIO、VINS-Fusion、ORB-SLAM3、OpenVINS、DM-VIO、SVO Pro 六系统源码分析，
 > 产出完整可工程落地的立体 VIO 方案设计。
+
+**PHAD 失败复盘约束**：本文档不是“一次性重写 VIO”的目标架构，而是后续实现必须遵守的安全迁移合同。任何新后端路径必须先 shadow 并跑，显式路标路径必须保留，pre-admission hard chi2 必须禁用，所有因子图 mutation 必须通过 GraphMutationPreflight，并且每阶段必须有 smoke/RMSE/crash gate。若实现与本节冲突，以本节安全约束优先。
+
+---
+
+## 零、实现安全门禁（从 PHAD 失败中提炼）
+
+### 0.1 禁止事项
+
+| 禁止事项 | 为什么 | 替代做法 |
+|----------|--------|----------|
+| 禁止 SmartFactor-only 作为生产后端 | PHAD 删除 PFB 后 V1_01 RMSE 从 0.09m 退化到 1.8m 级 | 显式 `Point3 + GenericStereoFactor` 永久保留为生产基线 |
+| 禁止无 shadow 的直接替换 | 新路径退化时无法快速回滚，失败发现延迟 | `SHADOW_GRAPH` 先并跑，只记录差异，不发布主 snapshot |
+| 禁止首次入图前 hard chi2 | 未优化 IMU 预测姿态会误杀好路标，造成视觉因子饥饿 | 入图前只做非法值/几何/key-value 检查；chi2 只 post-update 裁决 |
+| 禁止部分插入因子图 mutation | `L(id)` 有值无因子、slot/key 错配会导致秩亏或异常 | `GraphMutationPreflight` 失败则整批 rollback 或 shadow-only |
+| 禁止把 EuRoC 参数当作全局真理 | CLAHE、KF 视差、lag_seconds 在不同场景上方向相反 | 使用 `scenario_threshold_profile` 和控制变量矩阵 |
+
+### 0.2 分阶段实现 gate
+
+| 阶段 | 允许进入主图的能力 | 必须通过的 gate | 回滚条件 |
+|------|------------------|----------------|----------|
+| S0 显式基线 | IMU + 显式 GenericStereoFactor | 50 KF smoke：无 crash、无 GTSAM exception、VF/KF 稳定 | 任一异常即停止后续 SmartFactor 工作 |
+| S1 SmartFactor shadow | SmartFactor clone-and-add 只并跑记录 | shadow RMSE ≤ 显式基线 2×，异常率 <30% | 超过阈值保持禁用，不允许驱动主图 |
+| S2 Promotion preflight | Smart→Explicit mutation 只做结构检查 | key/value/slot/约束覆盖测试全过 | 任一 preflight 用例失败禁止 promotion |
+| S3 Promotion 主图 | 允许通过 gate 的 promotion 入主图 | V1_01 RMSE ≤0.15m 或不差于显式基线 2× | 超阈值立即 `FALLBACK_EXPLICIT` |
+| S4 Loop + post-loop promotion | 回环校正后提升受影响 SmartFactor | 无 `SymbolicNotFound` / `IndeterminateLinearSystemException`，回环后 RMSE 不恶化 | 关闭 post-loop promotion，只保留 loop BetweenFactor |
+| S5 多场景 profile | low_texture / fast_motion / slow_parallax 参数 profile | 单序列改善不得造成其他 profile 明显退化 | 不得设为默认 profile |
+
+### 0.3 参数与实验记录要求
+
+每个关键参数必须记录：本设计值、参考系统值、差异原因、适用场景、是否经过控制变量实验。任何修改以下参数的 PR 都必须附带 smoke/RMSE 结果：IMU 噪声、先验 sigma、iSAM2 lag/relinearize、SmartFactor noise、promotion 视差/重投影/SVD、Huber/chi2 阈值、KF 视差阈值。
 
 ---
 
@@ -105,10 +136,15 @@ UNINITIALIZED → STATIC_CHECK → STATIC_INIT ──成功──→ INITIALIZED
                RETRY (最多3次) → 降级为弱先验初始化
 
 INITIALIZED:
-  ├── NOMINAL (正常运营: SmartFactor试用期启用)
-  ├── LOOP_CORRECT (回环注入 + SmartFactor提升)
-  └── GLOBAL_BA (累计3次回环或漂移>0.5m触发)
+  ├── SHADOW_GRAPH (新后端路径并跑记录，不驱动主状态)
+  ├── NOMINAL (正常运营: 显式路标基线 + 已通过 gate 的 SmartFactor 试用)
+  ├── LOOP_CORRECT (回环注入 + 校正后 SmartFactor 提升)
+  ├── GLOBAL_BA (累计3次回环或漂移>0.5m触发)
+  ├── FALLBACK_EXPLICIT (SmartFactor/promotion 退化时回退显式路标路径)
+  └── SAFE_DEGRADED (图更新异常: 发布上一稳定快照, 前端仅 IMU+KLT)
 ```
+
+默认上线顺序是 `INITIALIZED → SHADOW_GRAPH → NOMINAL`，不是直接启用所有 SmartFactor/promotion 能力。`FALLBACK_EXPLICIT` 不是临时调试路径，而是长期保留的生产安全网；任何删除显式路标路径的实现都违反本文档。
 
 ### 1.3 LandmarkRecord 身份系统
 
@@ -144,7 +180,8 @@ struct LandmarkRecord {
 
     std::optional<gtsam::FactorIndex> smart_factor_slot; // SMART_TRIAL 时使用
     std::optional<gtsam::Key> point_key;                 // EXPLICIT 后为 L(id)
-    std::optional<gtsam::Point3> position_world;         // 后端优化/三角化结果缓存
+    std::optional<gtsam::Point3> position_world;         // 后端优化/三角化结果缓存，不是长期真值
+    uint64_t position_snapshot_id = 0;                   // 缓存来自哪个 BackendSnapshot/update
 
     LifecycleOwner owner;              // Frontend / LandmarkPipeline / Backend / Loop
     LandmarkQuality quality;
@@ -159,6 +196,8 @@ struct LandmarkRecord {
 - LoopClosing 只读 `LandmarkRecord` 与共视图，可请求提升/融合，但不直接分配 ID。
 
 因此：`TrackId` 是前端短期特征轨；`LandmarkId` 是地图级长期身份；`Point3` 只是某些状态下存在的几何表达。
+
+**存键优先原则**：跨线程、跨模块、跨回环保存长期引用时，优先保存 `KfId` / `LandmarkId` / `gtsam::Key`，不要保存裸 `Pose3` / `Point3` 当作长期真值。`position_world` 和 `optimized_navstate` 是缓存，只能在 `position_snapshot_id == latest_backend_snapshot_id` 且 key 仍在 smoother 中时用于投影；回环或重线性化后必须从 `smoother->calculateEstimate<Key>()` 刷新。PHAD 曾因“存值而非存键”导致回环使用过期姿态，本设计必须避免同类问题。
 
 ### 1.4 路标状态机
 
@@ -176,12 +215,13 @@ struct LandmarkRecord {
                     ┌────────────┐
                     │SMART_TRIAL │  (同一LandmarkId, SmartFactor隐藏Point3几何)
                     └─────┬──────┘
-                          │ 晋升门控通过 (≥4观测, 视差>3°, 重投影<2px, SVD条件数<1e6)
+                          │ 晋升门控通过 + GraphMutationPreflight 通过
+                          │ (≥4观测, 视差>3°, 重投影<2px, SVD条件数<1e6; 不含入图前hard chi²)
                           ▼
                     ┌────────────┐
                     │ PROMOTING  │  (创建L(id)+Point3, 不创建新LandmarkId)
                     └─────┬──────┘
-                          │ chi²后验通过
+                          │ 原子入图成功 (chi²后验稍后在post-update评估)
                           ▼
                     ┌────────────┐
                     │  EXPLICIT  │  (LandmarkRecord持有point_key=L(id), 参与iSAM2)
@@ -203,7 +243,7 @@ struct LandmarkRecord {
                     └────────────┘
 ```
 
-生命周期状态由 `LandmarkRecord` 唯一拥有；SmartFactor、GenericStereoFactor、`L(id)` 只是当前后端几何表示，不拥有路标身份。
+生命周期状态由 `LandmarkRecord` 唯一拥有；SmartFactor、GenericStereoFactor、`L(id)` 只是当前后端几何表示，不拥有路标身份。`PROMOTING` 只有在整批 graph mutation 通过 preflight 后才能提交；若 preflight 失败，路标回到 `SMART_RETRY` 或仅记录 shadow 诊断，不允许出现 `L(id)` 已插入但无因子约束的中间态。
 
 ---
 
@@ -462,9 +502,15 @@ void consumeBackendSnapshot(const BackendSnapshot& snap) {
      }
      ```
      建议: `max_snapshot_age_ms = 500`, `max_snapshot_kf_gap = 3`
-   - Backend 卡住时，Tracking 不依赖过期活跃路标做 3D-2D 投影匹配
+    - Backend 卡住时，Tracking 不依赖过期活跃路标做 3D-2D 投影匹配
 
-4. Track/Landmark ID 稳定性:
+4. Backend failure fallback:
+   - `GraphMutationPreflight` 失败 → 丢弃本批 `new_factors/new_values/delete_slots`，发布上一稳定 snapshot，进入 `SHADOW_GRAPH` 或 `FALLBACK_EXPLICIT`。
+   - `isam2.update()` 抛出 `IndeterminantLinearSystemException`、`ValuesKeyDoesNotExist`、`SymbolicNotFound` 等异常 → 回滚 smoother 备份，不发布失败结果，进入 `SAFE_DEGRADED`。
+   - shadow 图输出与主图差异超过 smoke/RMSE gate → 丢弃 shadow 输出，只保留诊断 JSONL。
+   - 任何 fallback 都必须记录触发原因、mutation 摘要、受影响 key/factor 数量。
+
+5. Track/Landmark ID 稳定性:
    - `LandmarkId` 在特征轨首次成为持久候选 `LandmarkRecord` 时分配，终身不变且不复用。
    - SmartFactor 晋升只分配几何变量 `L(id)`，复用已有 `LandmarkId`。
    - `TrackId` 是前端短期轨迹 ID；`LandmarkId` 是地图级长期身份，两者禁止混用。
@@ -714,6 +760,14 @@ function shouldPromote(record, smart_factor, current_estimate):
     // G10: 最小深度 (>0.1m)
     point3d = result.get()
     if point3d.norm() < 0.1: return false
+
+    // G11: 图修改可被原子提交
+    // 只检查结构，不检查 chi2。chi2 必须等 isam2.update() 后才有统计意义。
+    if not graphMutationPreflightWouldPass(record.id, smart_factor, point3d):
+        return false
+
+    // 禁止 G12: pre-admission hard chi2
+    // 入图前可记录 soft score，但不能因未优化位姿上的 chi2 拒绝路标。
     
     return true
 ```
@@ -725,6 +779,9 @@ function shouldPromote(record, smart_factor, current_estimate):
 | 重投影误差 | <2.0 px mean | 经验: 2px对应~0.5° bearing误差 @460focal |
 | SVD条件数 | <1e6 | 数值稳定性 |
 | 最小深度 | >0.1m | 防止近场野值 |
+| GraphMutationPreflight | key/value/slot/约束覆盖一致 | 防止 `L(id)` 无约束、因子引用缺 key、slot/landmark 混淆 |
+
+`chi²` 不属于晋升门控。PHAD 的 pre-admission chi2 失败说明：如果用 IMU 预测或未优化位姿先验来硬拒绝视觉观测，会造成特征饥饿。本文档中所有 chi2 硬裁决都只能出现在 `### 3.5 Post-update异常值剔除`。
 
 ### 3.4 晋升操作 (PROMOTING → EXPLICIT)
 
@@ -764,7 +821,27 @@ function promoteLandmark(record, smart_factor, current_estimate):
     
     // 6. 插入初始值
     new_values.insert(lmk_key, point3d)
+
+    // 7. 晋升是原子 graph mutation: 新 L(id)、引用它的因子、旧 SmartFactor 删除 slot 必须同批提交
+    preflight = GraphMutationPreflight(
+        current_values=current_values,
+        new_values=new_values,
+        new_factors=new_factors,
+        delete_slots=delete_slots,
+        required_new_key=lmk_key)
+    if !preflight.ok:
+        rollbackPendingPromotion(record.id, lmk_key, new_factors, delete_slots)
+        record.state = SMART_RETRY
+        record.diag.last_promotion_failure = preflight.reason
+        return PREFLIGHT_FAILED
 ```
+
+**原子性不变量**：
+
+- `new_values.insert(lmk_key, point3d)` 必须和第一批引用 `lmk_key` 的 `GenericStereoFactor` 在同一次 `isam2.update()` 中提交。
+- 任何因子引用的 key 必须属于 `current_values ∪ new_values`；即将边缘化或已被删除的 key 禁止引用。
+- `delete_slots` 是 `FactorIndex`，不是 `LandmarkId`；slot 查找失败时禁止猜测转换。
+- preflight 失败只允许 rollback 或 shadow-only，不允许留下 `record.point_key` 已设置但图中无约束的半晋升状态。
 
 ### 3.5 Post-update异常值剔除 (EXPLICIT → STABLE/REMEDIATING/CULLED)
 
@@ -775,15 +852,22 @@ function postUpdateOutlierCheck(isam2_result, explicit_landmarks):
         residuals = computeStereoResiduals(lmk, isam2_result)
         chi2 = residuals^T * Σ^{-1} * residuals  // Σ = Isotropic(3,1.5)
         
-        if chi2 > chi2_threshold (7.815):  // χ²₃, p=0.05
+        if chi2 > chi2_threshold (7.815):  // χ²₃, p=0.05; post-update only
             lmk.consecutive_outlier_count++
-            if lmk.consecutive_outlier_count >= 3:  // ORB-SLAM3 nThObs
+            if lmk.consecutive_outlier_count == 1:
+                lmk.state = EXPLICIT  // 只记录 warning，不立刻剔除
+            elif lmk.consecutive_outlier_count < 3:
+                lmk.state = REMEDIATING
+                downweightLandmark(lmk, profile=scenario_threshold_profile)
+            else:  // ORB-SLAM3 nThObs 风格的持续异常
                 cullLandmark(lmk)                    // → CULLED
         else:
             lmk.consecutive_outlier_count = 0
             if lmk.total_observations >= min_stable_obs (10):
                 lmk.state = STABLE                   // → STABLE
 ```
+
+低纹理、快速运动、慢速小视差 profile 可以临时放宽 post-update 阈值，但必须写入探针日志；不能静默修改全局 chi2 阈值，也不能把放宽后的阈值用于首次入图前 hard gate。
 
 ### 3.6 路标参数表
 
@@ -797,12 +881,19 @@ function postUpdateOutlierCheck(isam2_result, explicit_landmarks):
 | consecutive_outlier_cull | 3帧 | ORB-SLAM3 `nThObs` |
 | depth_filter_convergence | σ² < (μ_range/200)² | SVO Pro |
 | min_stable_obs | 10 | 经验 |
-| smart_factor_pixel_sigma | 3.0 px | Kimera `smartNoiseSigma_` |
+| smart_factor_pixel_sigma | 3.0 px | Kimera `smartNoiseSigma_`; 传给 `Isotropic::Sigma(3, 3.0)`，对应 `(uL,uR,v)` 三维立体测量 |
 | explicit_pixel_sigma | 1.5 px | 晋升后收紧 |
-| outlier_rejection_sigma | 3.0 | Kimera `outlierRejection_` |
+| outlier_rejection_sigma | 3.0 (EuRoC YAML); 8.0 (Kimera C++默认) | Kimera `outlierRejection_`; 非 EuRoC 数据需按噪声重新标定 |
 | landmark_distance_threshold | 20.0 m (Euroc YAML: 10.0) | Kimera header默认(20.0), Euroc覆盖为10.0 |
-| retriangulation_threshold | 1e-3 | Kimera |
+| retriangulation_threshold | 1e-3 | Kimera 默认；GTSAM `SmartProjectionParams` 默认更严(1e-5)，本方案沿用 Kimera 的较宽阈值 |
 | max_feature_track_age | 25 KFs | Kimera |
+| enable_shadow_promotion | true | 新 promotion 策略先并跑诊断，不驱动主图 |
+| enable_explicit_fallback | true | 显式路标路径永久保留，禁止删除 |
+| allow_pre_admission_hard_chi2 | false | 禁止首次入图前 chi2 硬拒绝 |
+| graph_preflight_required | true | 每次 promotion / factor insertion 前执行 key/value/slot 检查 |
+| scenario_threshold_profile | euroc / low_texture / fast_motion / slow_parallax | 按数据集选择阈值 profile |
+| low_texture_chi2_relax_factor | 1.5× | 仅 post-update，可探针记录后使用 |
+| fast_motion_reproj_relax_px | +0.5 px | 快速运动 profile 下的 promotion 重投影临时放宽 |
 
 ### 3.7 共视与置信度指标
 
@@ -811,7 +902,7 @@ function postUpdateOutlierCheck(isam2_result, explicit_landmarks):
 ```cpp
 function updateCovisibilityGraph(records):
     for each record in records where record.state not in {CULLED}:
-        obs_kfs = unique(record.observations.kf_id)
+        obs_kfs = unique([obs.kf_id for obs in record.observations])
         weight = record.state in {EXPLICIT, STABLE} ? 1.0 : 0.3  // SmartTrial 低权重
         weight *= record.quality.confidence
         for each unordered pair (kf_i, kf_j) in obs_kfs:
@@ -943,9 +1034,11 @@ void anchorInitialState(LocalStateEstimate init):
 
 ### 4.4 SmartFactor启用策略
 
-Kimera-VIO 从 KF=1 立即启用 SmartFactor，无需"前N帧禁用"阶段。前提是首帧先验极紧（位置σ=1e-5m），给SmartFactor提供稳定参考系进行三角化。
+Kimera-VIO 从 KF=1 立即启用 SmartFactor，无需"前N帧禁用"阶段。前提是首帧先验极紧（位置σ=1e-5m），给 SmartFactor 提供稳定参考系进行三角化。
 
-**本方案推荐相同策略**：初始化质量保证（紧先验）→ 信任SmartFactor从第一帧工作。如果初始化质量不确定，可保留前10 KF禁用SmartFactor的降级选项。
+**本方案不直接照搬该策略**。为满足集成设计约束 C3，初始化期间（前 10 个 KF，或直到 `INITIALIZATION_KF_COUNT` 满足）禁用 SmartFactor，所有通过深度门控的路标先以显式 `Point3 + GenericStereoFactor` 进入后端。进入 `NOMINAL` 后才启用 `SMART_TRIAL`，让 SmartFactor 承担低成本试用期几何约束。
+
+原因：Factor-VIO 的静态/动态初始化虽然给首帧紧位置先验，但早期速度、bias、尺度一致性与关键帧间基线仍在收敛。此时使用隐式三角化会把位姿不确定性折进 SmartFactor 内部缓存；显式路标虽然更贵，但能在初始化期通过后验 chi² 与 `position_world` 明确暴露质量问题。
 
 ---
 
@@ -968,8 +1061,10 @@ Kimera-VIO 从 KF=1 立即启用 SmartFactor，无需"前N帧禁用"阶段。前
 
 | # | 来源 | GTSAM 类 | Kimera 创建位置 | 连接 | 噪声 | 何时使用 | Factor-VIO? |
 |---|------|----------|---------------|------|------|---------|------------|
-| V1 | 🏷️ | `SmartStereoProjectionPoseFactor` | `L489`: `new SmartStereoFactor(noise, params, T_b_cam)` | `X(t₁)...X(tₙ)` (多帧位姿) | `Isotropic(3, 3.0)` | **每 KF**,所有路标 | ✅ SmartFactor 试用期 |
+| V1 | 🏷️ | `SmartStereoProjectionPoseFactor` | `L489`: `new SmartStereoFactor(noise, params, T_b_cam)` | `X(t₁)...X(tₙ)` (多帧位姿) | `Isotropic(3, 3.0)` | `NOMINAL` 后的试用期路标 | ✅ SmartFactor 试用期 |
 | V2 | ✨ | `GenericStereoFactor<Pose3,Point3>` | 不存在于默认 VioBackend; RegularVioBackend `L836` | `X(k), L(id)` | `Isotropic(3, 1.5)` | SmartFactor 晋升后 | ✅ 显式路标 |
+
+> `SmartStereoProjectionPoseFactor` 位于 `gtsam_unstable/slam/`，不是稳定 GTSAM API。工程实现应锁定 GTSAM 版本，或用本项目适配层封装 `SmartStereoProjectionPoseFactor` / `SmartStereoProjectionParams`，避免上游 API 变动直接扩散到业务代码。
 
 #### 5.2.2 IMU 因子
 
@@ -1090,7 +1185,28 @@ function optimize(timestamp_kf_nsec, cur_id, max_extra_iterations, extra_delete_
             err = computeStereoReprojError(refined_pose, obs)
             if err.chi2 > 7.815: obs.suspect = true  // χ²_3, p=0.05 (stereo residual: uL,uR,v)
     
-    // ===== 阶段 2: iSAM2 增量平滑 =====
+    // ===== 阶段 2: GraphMutationPreflight =====
+    preflight = checkGraphMutation(
+        current_values = smoother->calculateEstimate(),
+        new_values = new_values_,
+        new_factors = new_factors_tmp,
+        delete_slots = delete_slots,
+        marginalization_timestamps = key_frame_count)
+    if !preflight.ok:
+        dumpGraphMutationSummary(preflight)
+        discard(new_factors_tmp, new_values_, delete_slots)
+        enterMode(config.enable_explicit_fallback ? FALLBACK_EXPLICIT : SAFE_DEGRADED)
+        publishLastStableSnapshot()
+        return false
+
+    // checkGraphMutation 必须覆盖:
+    //   1. 每个 factor.keys() 都存在于 current_values ∪ new_values
+    //   2. 每个 new_values key 至少被一个因子引用，或是 X/V/B 状态变量
+    //   3. delete_slots 都是当前 smoother 中存在的 FactorIndex
+    //   4. 待删除变量没有被 active factor 引用
+    //   5. 同一个 L(id) 不被 SmartFactor 隐式几何和 GenericStereoFactor 显式几何同时作为主约束重复驱动
+
+    // ===== 阶段 3: iSAM2 增量平滑 =====
     // isam2.update() = 增量非线性优化 (增量平滑, 非批量 BA)
     //   1. 将 new_factors 在当前线性化点线性化 → 高斯因子
     //   2. 对受影响的 clique 做消元 (elimination) → 更新 Bayes Tree
@@ -1124,24 +1240,25 @@ function optimize(timestamp_kf_nsec, cur_id, max_extra_iterations, extra_delete_
     
     if not result: return false
     
-    // ===== 阶段 3: 恢复 SmartFactor 槽位映射 =====
+    // ===== 阶段 4: 恢复 SmartFactor 槽位映射 =====
     // result.newFactorsIndices: 每个新因子的槽位索引 (与new_factors_tmp 1:1)
     updateNewSmartFactorsSlots(lmk_ids_tmp, old_smart_factors_, result)
     // 内部: old_smart_factors_[lmk_id].second = result.newFactorsIndices[i]
     
-    // ===== 阶段 4: 更新状态 + 清理 =====
+    // ===== 阶段 5: 更新状态 + 清理 =====
     state_ = smoother->calculateEstimate()
     updateStates(cur_id)                             // 从state_提取 X/V/B
+    refreshExplicitLandmarkCaches(state_, snapshot_id) // 只刷新 EXPLICIT/STABLE 的 position_world 缓存
     new_smart_factors_.clear()                       // 消耗完毕
     new_imu_prior_and_other_factors_.resize(0)       // 消耗完毕
     
-    // ===== 阶段 5: 重复迭代 (如果 max_extra_iterations > 1) =====
+    // ===== 阶段 6: 重复迭代 (如果 max_extra_iterations > 1) =====
     for n_iter = 1..max_extra_iterations:
         // 用更新后的状态重新线性化
         result = updateSmoother(&result)
         // Kimera: numOptimize=1 (Euroc YAML), 即不做额外迭代
     
-    // ===== 阶段 6: 后处理统计 =====
+    // ===== 阶段 7: 后处理统计 =====
     postDebug(total_start_time)                       // 计算优化前后误差对比
     computeSmartFactorStatistics()                    // 统计退化/远点/异常值
     
@@ -1171,9 +1288,9 @@ ORB-SLAM3 没有 iSAM2 增量优化，它的 LocalMapping 线程是**批量处�
 | 维度 | Factor-VIO (iSAM2 增量) | ORB-SLAM3 LocalMapping (批量) |
 |------|------------------------|------------------------------|
 | 优化触发 | 每个 KF 触发一次 `isam2.update()` | 空闲时处理队列中所有 KF |
-| 路标管理 | SmartFactor 隐式 + GenericStereoFactor 显式 | MapPoint 显式对象 + 引用计数 + BA |
+| 路标管理 | `LandmarkRecord` 显式管理身份/生命周期；SmartFactor/GenericStereoFactor 只表达几何约束 | MapPoint 显式对象 + 引用计数 + BA |
 | 路标剔除 | chi² 后验 + SmartFactor 内部拒绝 | `MapPointCulling()`: found_ratio<0.25 或 创建2KF后观测≤3 |
-| 三角化 | SmartFactor 隐式 / 晋升时显式 | `CreateNewMapPoints()`: KF 间 ORB 匹配 + 视差检查 |
+| 三角化 | SmartFactor 隐式几何 / 晋升时创建显式 `Point3` | `CreateNewMapPoints()`: KF 间 ORB 匹配 + 视差检查 |
 | BA | iSAM2 增量自动处理 | `LocalBundleAdjustment()` / `LocalInertialBA()` 显式调用 |
 | 冗余 KF 剔除 | 边缘化自动处理 | `KeyFrameCulling()`: 90%(视觉)/50%(双目惯性) 观测被其他 KF 覆盖则剔除 |
 | IMU 初始化 | 初始化阶段完成后开始 | `InitializeIMU()`: 在 LocalMapping 线程中渐进初始化 |
@@ -1368,7 +1485,7 @@ Factor-VIO 的 BA (隐式 iSAM2 增量):
 
 | ORB-SLAM3 | g2o 调用 | 优化变量 | Factor-VIO 等价物 | 缺失风险 |
 |-----------|---------|---------|------------------|---------|
-| Motion-only BA | `Optimizer::PoseOptimization` | 仅当前帧位姿, 固定 MapPoint | **Tracking 级 PoseRefinement** (§2.2 PHASE 6b), 用 BackendSnapshot.active_landmarks 做 3D-2D 投影匹配 | 若未开启则缺失 ORB-SLAM3 式实时位姿精化 |
+| Motion-only BA | `Optimizer::PoseOptimization` | 仅当前帧位姿, 固定 MapPoint | **Tracking 级 PoseRefinement** (§2.1 PHASE 6b), 用 BackendSnapshot.active_landmarks 做 3D-2D 投影匹配 | 若未开启则缺失 ORB-SLAM3 式实时位姿精化 |
 | Pre-iSAM Pose Refinement | ORB-SLAM3 无直接等价 | 仅当前 KF 位姿, 固定显式路标 | **Backend 阶段 1.5** (§5.3), 入图前改善 X(cur_id) 初值, 保护 iSAM2 线性化点 | 不能替代 Tracking 级 PoseRefinement |
 | Local BA | `Optimizer::LocalBundleAdjustment` | 当前 KF + 共视 KF + 路标 | `isam2.update()` 加新 SmartFactor——共视 KF 所在的 clique 被重线性化 | 无 |
 | Local Inertial BA | `Optimizer::LocalInertialBA` | Local BA + 速度/偏置/重力 | `isam2.update()` 加新 IMU 因子 + SmartFactor——IMU 连接的变量所在 clique 被触发 | 无 |
@@ -1395,7 +1512,7 @@ Factor-VIO 只有 **一个 iSAM2**，所有优化通过增量 `isam2.update()` �
 
 | 维度 | ORB-SLAM3 多层 BA | Factor-VIO 单 iSAM2 |
 |------|------------------|-------------------|
-| Motion-only BA | **显式**调用, 固定路标只优化位姿 | **Tracking 级 PoseRefinement** (§2.2 PHASE 6b) 显式执行——不是 iSAM2.update() 的隐式等价物 |
+| Motion-only BA | **显式**调用, 固定路标只优化位姿 | **Tracking 级 PoseRefinement** (§2.1 PHASE 6b) 显式执行——不是 iSAM2.update() 的隐式等价物 |
 | Local BA | **显式**批量 LM 迭代窗口内所有变量 | **隐式**——`isam2.update()` 的重线性化等价于对受影响 clique 做 BA |
 | 回环后 Essential Graph | **显式**优化所有 KF 位姿 (不含路标) | **隐式**——BetweenFactor 注入后 Bayes Tree 增量传播校正 |
 | 回环后路标优化 | **显式** Full BA 重新优化所有 MapPoint | **缺失**——iSAM2 做 incremental update 但不会像 Full BA 那样从头重建所有路标位置 |
@@ -1417,7 +1534,7 @@ Factor-VIO 只有 **一个 iSAM2**，所有优化通过增量 `isam2.update()` �
 
 3. **紧首帧先验 + 强 IMU 约束**：减少漂移累积，降低回环时的校正量，使得 iSAM2 增量传播足够覆盖校正范围。
 
-### 5.4c ORB-SLAM3 的因子体系 (g2o 边) 与 Factor-VIO (GTSAM 因子) 对照
+### 5.4b ORB-SLAM3 的因子体系 (g2o 边) 与 Factor-VIO (GTSAM 因子) 对照
 
 ORB-SLAM3 **不使用 SmartStereo**——它基于 g2o，所有路标都是显式的 `VertexSBAPointXYZ`。
 
@@ -1448,14 +1565,14 @@ ORB-SLAM3 **不使用 SmartStereo**——它基于 g2o，所有路标都是显�
 
 | | ORB-SLAM3 (g2o) | Factor-VIO (GTSAM) |
 |---|---|---|
-| 路标存在形式 | **始终显式** `VertexSBAPointXYZ` | SmartFactor 隐式 (试用期) → `Point3` 显式 (晋升后) |
+| 几何变量存在形式 | **始终显式** `VertexSBAPointXYZ` | `LandmarkRecord` 始终显式；`Point3` 在 SmartFactor 试用期隐式、晋升后显式 |
 | 路标初始值 | 关键帧间 ORB 匹配+三角化 | 深度滤波器 (SVO Pro) → SmartFactor 隐式三角化 → 晋升时显式 |
 | 路标剔除 | `MapPointCulling`: found_ratio<0.25 或 2KF 后观测≤3 | chi² 后验 + SmartFactor 内部拒绝 + 连续 3 帧异常值 |
 | BA 中的路标角色 | **参与优化**——和位姿一起被 g2o LM 迭代 | 试用期: **不参与** (Schur 补消去); 晋升后: **参与** (iSAM2 状态变量) |
 | 新增路标的 BA 成本 | O(n³) 随路标数增长 (全局批量) | 近似 O(1) 增量 (在固定窗口+稀疏连接前提下, clique 有界) |
 | 路标总数上限 | 受限于批量 BA 计算时间 (通常 1000-3000) | 受限于 iSAM2 窗口大小 (固定, ~25-30 KFs 内的路标) |
 
-### 5.4b 为什么 Kimera 用隐式几何，而 VINS/ORB-SLAM3 用显式路标？
+### 5.4c 为什么 Kimera 用隐式几何，而 VINS/ORB-SLAM3 用显式路标？
 
 这不是偶然的技术选择——是后端架构决定的必然结果。
 
@@ -1516,13 +1633,16 @@ Factor-VIO 的"试用期 SmartFactor → 晋升显式路标"正是要同时获�
 - 日常运营：SmartFactor 的 近似常数时间增量和低 `Point3` 状态变量负担
 - 回环/全局 BA/重定位：显式路标的描述子和全局优化能力
 
+Kimera-VIO 的 `RegularVioBackend` 已有 `isSmartFactor3dPointGood()` 与 `convertSmartToProjectionFactor()`，用于把 SmartFactor 转换为显式投影因子以接入结构规则约束。Factor-VIO 借鉴的是这种 Smart→ProjectionFactor 的图手术模式，但目标从结构平面约束扩展到回环 PnP、显式 BA 和长期地图身份管理。
+
 这和 OKVIS2 的设计理念一致——OKVIS2 在正常运营时将路标边缘化为位姿图边（类似 SmartFactor），回环时再逆向恢复为显式路标和观测。
 
 #### 一、架构哲学
 
 ```
-ORB-SLAM3: "先信任, 后验证"
-  路标创建 → 立即可用 (VertexSBAPointXYZ)
+ORB-SLAM3: "有限验证 → 信任 → 事后强化验证"
+  KF 间匹配先通过对极/视差/正深度/重投影误差检查
+  → 路标创建 → 立即可用 (VertexSBAPointXYZ)
   → 参与 BA 优化 3D 位置
   → MapPointCulling 事后剔除不靠谱的
   
@@ -1536,7 +1656,7 @@ Factor-VIO: "先验证, 后信任"
 
 | 阶段 | ORB-SLAM3 | Factor-VIO |
 |------|----------|-----------|
-| 创建 | KF 间 ORB 匹配 + 三角化 → 立即 `new MapPoint` → `VertexSBAPointXYZ` | 创建 `LandmarkRecord` 身份 → 立体匹配成功 → `DEPTH_FILTER` → 深度收敛 → `SMART_TRIAL` |
+| 创建 | KF 间 ORB 匹配 + 对极/视差/正深度/重投影预检查 → `new MapPoint` → `VertexSBAPointXYZ` | 创建 `LandmarkRecord` 身份 → ≥2 帧双目观测 + 深度有效 → `DEPTH_FILTER` → 深度收敛 → `SMART_TRIAL` |
 | 初值 | 三角化结果直接作为 g2o 顶点初值 | 深度滤波器收敛值 → SmartFactor 隐式三角化 |
 | 早期优化 | BA 中参与迭代（位姿+路标联合优化） | SmartFactor 内部 Schur 补——Point3 不进入状态，只约束位姿 |
 | 中期稳定 | 连续观测 → `mnFound/mnVisible` 统计 | 4+ 帧观测 + 10 条件通过 → 晋升为显式 `Point3` |
@@ -1591,7 +1711,7 @@ Factor-VIO: "先验证, 后信任"
 
 | 场景 | ORB-SLAM3 | Factor-VIO |
 |------|----------|-----------|
-| 三角化初值差 | **BA 可修正**——路标是变量, 多帧观测在批量迭代中拉回正确位置 | **试用期危险**——SmartFactor 隐式三角化依赖位姿精度, 位姿偏则三角化偏, 无迭代修正 |
+| 三角化初值差 | **BA 可修正**——路标是变量, 多帧观测在批量迭代中拉回正确位置 | **试用期危险**——SmartFactor 隐式三角化依赖位姿精度；没有独立 `Point3` 变量被 BA 迭代修正，几何只能随位姿更新间接改善 |
 | 路标误匹配 (outlier) | **事前剔除弱**——三角化直接进 BA; **事后剔除强**——MapPointCulling + BA 中 Huber 核 | **事前过滤强**——双轮 RANSAC + 深度滤波 + 10 条件门控; 晋升后 chi² 监测 |
 | 路标被动态物体污染 | 进入 BA → 可能污染位姿估计 → 后续 MapPointCulling 剔除 | 难以通过双轮 RANSAC + 深度滤波 → 难以进入 SmartFactor 试用期 |
 | 弱纹理场景 (MH) | ORB 特征不足 → 三角化困难 → 路标数量少 → BA 约束弱 | KLT 在弱纹理下跟踪困难 → SmartFactor 退化率高 → 晋升率低 |
@@ -1614,7 +1734,7 @@ Factor-VIO: "先验证, 后信任"
 | 机制 | 触发条件 | 动作 |
 |------|---------|------|
 | **chi² 后验异常值剔除** (§3.5) | 显式路标 `chi² > 7.815` (χ²₃, p=0.05) | 标记异常; 连续 3 帧 → `CULLED` |
-| **`REMEDIATING` 状态** (§1.3 路标状态机) | 显式路标偶发异常 | 允许恢复: 若后续 chi² 连续通过 → 回到 `STABLE`; 若持续异常 → `CULLED` |
+| **`REMEDIATING` 状态** (§1.4 路标状态机) | 显式路标偶发异常 | 允许恢复: 若后续 chi² 连续通过 → 回到 `STABLE`; 若持续异常 → `CULLED` |
 | **SmartFactor 内部异常值拒绝** | `DynamicOutlierRejectionThreshold=3.0` | 3σ 外重投影观测被 SmartFactor 内部拒绝, 不参与隐式三角化 |
 | **`prunePostUpdateOutlierObservations`** | chi² 后验发现异常观测 | 重建 SmartFactor (移除异常观测) 或降级为 CULLED |
 | **退化检测 (SmartFactor)** | `isDegenerate()==true` | ZERO_ON_DEGENERACY 模式: 退化几何的 Jacobian 归零, 不影响位姿优化 |
@@ -1635,7 +1755,7 @@ Factor-VIO: "先验证, 后信任"
 **ORB-SLAM3 显式路标的劣势**:
 1. **坏路标污染 BA**——错误三角化的路标会拉偏位姿, 依赖 Huber 核 + MapPointCulling 事后补救
 2. **计算随路标数增长**——不能无限增加路标, 需 KeyFrameCulling 控制规模
-3. **路标初始三角化无质量门控**——ORB 匹配 + 视差检查是仅有的过滤
+3. **路标初始三角化门控较轻**——ORB 匹配 + 对极/视差/正深度/重投影检查存在，但弱于 Factor-VIO 的深度滤波 + SmartFactor 晋升门控
 4. **内存占用大**——所有 KF 和 MapPoint 长期驻留
 
 **Factor-VIO 隐式→显式的优势**:
@@ -1751,8 +1871,14 @@ procedure updateSmoother(new_factors, new_values, timestamps, delete_slots):
            InvalidArgumentThreadsafe | ValuesKeyDoesNotExist | CholeskyFailed |
            RuntimeErrorThreadsafe | OutOfRangeThreadsafe | ...共12种):
         printSmootherInfo(...)    // 打印完整诊断
+        dumpGraphMutationSummary(new_factors, new_values, timestamps, delete_slots)
+        smoother = backup
+        publishLastStableSnapshot()
+        enterMode(config.enable_explicit_fallback ? FALLBACK_EXPLICIT : SAFE_DEGRADED)
         return false
 ```
+
+异常恢复的目标是保护上一稳定图，而不是“尽量把本批 mutation 塞进去”。凡是 preflight 或 update 失败，本轮 `new_factors/new_values/delete_slots` 必须被丢弃或降为 shadow-only；禁止发布失败后的部分估计。
 
 ### 5.7 诊断监控
 
@@ -1763,6 +1889,10 @@ procedure updateSmoother(new_factors, new_values, timestamps, delete_slots):
 | nOutlierRejected/nTotal | <0.1 | >0.3 |
 | relinearizedCount | <5 | >20 |
 | imuBiasDrift/frame | <1e-6 | >1e-4 |
+| graph_preflight_failures/KF | 0 | >0 |
+| shadow_rmse_multiplier | <2.0 | >2.0 |
+| pre_admission_hard_chi2_count | 0 | >0 |
+| fallback_explicit_count/session | 0-1 | >3 |
 
 ---
 
@@ -1797,10 +1927,15 @@ function geometricVerify(query_kf, loop_kf):
     // 主路径: 3D-2D PnP RANSAC
     // 只使用 LandmarkRecord 中 EXPLICIT/STABLE、position_world 有效、confidence 足够的路标
     loop_records = landmark_registry_.recordsObservedBy(loop_kf.id)
-    pnp_records = filter(loop_records,
+    candidate_records = filter(loop_records,
         state in {EXPLICIT, STABLE} and position_world and quality.confidence > 0.6)
-    pts3d = [r.position_world for r in pnp_records]
-    pts2d = query_kf.getObservations([r.id for r in pnp_records])
+
+    // query_kf 不一定已经持有这些 LandmarkId 的观测；先做描述子/投影匹配建立 3D-2D 对应。
+    // 关键帧创建时必须提取 ORB/BRIEF 描述子并写入 KeyframeDatabase；LandmarkRecord 只保存观测引用。
+    // ORB-SLAM3 使用 MLPnPsolver；这里选择 OpenCV solvePnPRansac 是工程简化，阈值需按像素噪声标定。
+    matches = matchQueryFeaturesToLoopLandmarks(query_kf, candidate_records)
+    pts3d = [m.landmark_record.position_world for m in matches]
+    pts2d = [m.query_keypoint.pixel for m in matches]
     
     if pts3d.size() >= 15:
         success, T_rel, inliers = solvePnPRansac(
@@ -1829,7 +1964,9 @@ procedure onLoopAccepted(query_kf, loop_kf, T_rel, covariance):
     loop_factor = BetweenFactor<Pose3>(
         X(query_kf.id), X(loop_kf.id), T_rel,
         noiseModel::Gaussian::Covariance(covariance))  // 从PnP内点估计,非Identity!
-    loop_factor_with_huber = Robust(Huber(1.345), loop_factor)
+    // Pose3 BetweenFactor 为 6-DOF 残差；若使用 Huber，应按 χ²₆ 标定，sqrt(χ²₆,0.95)≈3.55。
+    // 若 PnP covariance 已可信，也可不额外包 Huber，避免过度降权合法回环。
+    loop_factor_with_huber = Robust(Huber(3.5), loop_factor)
     
     // 2. iSAM2更新 → 传播校正到位姿
     smoother->update({loop_factor}, {}, {}, {})
@@ -1838,14 +1975,24 @@ procedure onLoopAccepted(query_kf, loop_kf, T_rel, covariance):
     affected_kfs = {loop_kf.id} ∪ covisibility_graph_.neighbors(loop_kf.id, min_weight=3.0)
     affected_records = landmark_registry_.recordsObservedByAny(affected_kfs)
     for each record in affected_records where record.state == SMART_TRIAL:
-        smart_lmk = old_smart_factors[record.id]
-        if smart_lmk.connected_poses ∩ affected_kfs ≠ ∅:
+        smart_it = old_smart_factors.find(record.id)
+        if smart_it == old_smart_factors.end():
+            continue  // 身份不变量检查会记录 orphan / missing SmartFactor
+        smart_slot = smart_it->second
+        smart_factor = smart_slot.factor  // 若实际类型为 pair<SmartFactorPtr, Slot>, 则取 smart_it->second.first
+        connected_kfs = keysToKfIds(smart_factor.keys())
+        if connected_kfs ∩ affected_kfs ≠ ∅:
             // 4. 用校正后位姿重三角化 → 请求提升为显式
-            if canPromote(record, smart_lmk, corrected_estimate):
-                promoteLandmark(record, smart_lmk, corrected_estimate)
+            if shouldPromote(record, smart_factor, corrected_estimate):
+                promoteLandmark(record, smart_factor, corrected_estimate)
     
     // 5. 再次iSAM2更新 → 纳入提升后的显式因子
     smoother->update(promoted_factors, promoted_values, {}, promoted_delete_slots)
+
+    // 6. 刷新受回环影响的显式路标缓存，避免 LandmarkRecord.position_world 与 iSAM2 Values 脱节
+    refreshed_estimate = smoother->calculateEstimate()
+    for each record in affected_records where record.point_key:
+        record.position_world = refreshed_estimate.at<Point3>(record.point_key)
 ```
 
 ---
@@ -1958,6 +2105,34 @@ GTSAM MakeSharedD = NED (不兼容, 会导致优化发散)
 | cacheLinearized | true |
 | findUnusedSlots | true |
 | 窗口大小 | 25-30 KFs |
+
+### 8.5 PHAD 防退化与场景 profile 参数
+
+| 参数 | 值 | 作用 |
+|------|-----|------|
+| enable_shadow_graph_updates | true | 新图修改先并跑诊断，不发布主状态 |
+| enable_explicit_fallback | true | SmartFactor/promotion 失败时回退显式路标生产基线 |
+| graph_preflight_required | true | 每次 `isam2.update()` 前检查 key/value/slot/约束覆盖 |
+| allow_pre_admission_hard_chi2 | false | 禁止首次入图前 hard chi2 |
+| smoke_max_runtime_s | 60s | 50 KF smoke 最大运行时间 |
+| smoke_max_rmse_multiplier | 2.0× baseline | 新路径早期 RMSE 不得超过显式基线 2× |
+| rmse_gate_euroc_v101_max_m | 0.15m | V1_01 单序列安全门 |
+| crash_gate_allowed_exceptions | 0 | `SymbolicNotFound`、`ValuesKeyDoesNotExist`、`IndeterminateLinearSystemException` 均为阻断 |
+| scenario_threshold_profile | euroc / low_texture / fast_motion / slow_parallax | 数据集级阈值 profile |
+| low_texture_chi2_relax_factor | 1.5× | 仅 post-update 使用，必须探针记录 |
+| fast_motion_reproj_relax_px | +0.5px | 快速运动 profile 下临时放宽 promotion 重投影 |
+| slow_parallax_min_obs_for_promotion | 6-8 | 慢速小视差场景延迟 promotion |
+
+### 8.6 关键参数对照表（实现前必须补齐）
+
+| 参数族 | 本设计值 | 参考系统值 | 差异原因 | 验证要求 |
+|--------|----------|------------|----------|----------|
+| IMU noise / walk | 见 8.2 | Kimera/OpenVINS/Kalibr | 按传感器标定 | 单独 smoke + bias drift probe |
+| Pose/velocity/bias prior sigma | 见 4.3 | Kimera Euroc | 禁止自作主张收紧 1e4× | 初始化 smoke + V1_01 RMSE |
+| iSAM2 lag / relinearize | 5s / 0.01 / skip=1 | Kimera + GTSAM 示例 | 场景依赖强 | low_texture / fast_motion profile sweep |
+| SmartFactor noise/outlier | 3.0px / 3.0 | Kimera Euroc YAML | 非 EuRoC 需重标定 | shadow-vs-explicit RMSE 对比 |
+| Promotion parallax/reproj/SVD | 3° / 2px / 1e6 | VINS/Kimera/数值经验 | 防小视差退化 | slow_parallax 控制变量矩阵 |
+| Huber/chi2 | χ²₃=7.815 | ORB-SLAM3 stereo BA | 只 post-update | pre_admission_hard_chi2_count 必须为 0 |
 
 ---
 
@@ -2302,10 +2477,10 @@ void verifyLandmarkIdentityInvariants(
     }
 
     // 3. TrackId 不能被当作 LandmarkId 使用；映射目标必须存在
+    // TrackId 与 LandmarkId 是不同强类型命名空间；允许数值相同，不做 runtime 数值不等检查。
+    // 真正要防的是 API 接受裸 uint64_t，或把 TrackId 直接传给 L(id) / registry.at(LandmarkId)。
     for (auto& [track_id, lmk_id] : track_map) {
         CHECK(registry.exists(lmk_id)) << "orphan TrackId: " << track_id;
-        CHECK_NE(static_cast<uint64_t>(track_id), static_cast<uint64_t>(lmk_id))
-            << "TrackId/LandmarkId namespace leak";
     }
 
     // 4. Snapshot 只能发布 EXPLICIT/STABLE 且未 CULLED 的路标
@@ -2451,6 +2626,17 @@ struct BackendProbe {
     int n_zupt = 0;                  // 零速先验
     int n_deleted_slots = 0;         // delete_slots 中的槽位数
 
+    // ======== PHAD 防退化 gate ========
+    int graph_preflight_ok = 0;          // GraphMutationPreflight 通过次数
+    int graph_preflight_fail = 0;        // preflight 失败次数；正常必须为 0
+    int preflight_missing_key = 0;       // 因子引用不存在 key
+    int preflight_unconstrained_key = 0; // new_values 中有无约束 L(id)
+    int preflight_invalid_delete_slot = 0; // delete_slots 中无效 FactorIndex
+    int pre_admission_hard_chi2_count = 0; // 首次入图前 hard chi2 调用次数；必须恒为 0
+    int shadow_updates = 0;              // shadow graph 并跑次数
+    double shadow_rmse_multiplier = 1.0; // shadow RMSE / 显式基线 RMSE
+    int fallback_explicit_count = 0;     // 回退显式基线次数
+
     // ======== iSAM2 更新 ========
     int update_ok = 0;               // update 成功
     int update_fail = 0;             // update 失败 (任意异常)
@@ -2496,9 +2682,10 @@ struct BackendProbe {
 
 | 收集时机 | 填充的字段 |
 |---------|-----------|
-| optimize() 阶段 1.5 后 | `moba_*`, `time_pre_isam_ms` |
+| optimize() 阶段 1.5 后 | `moba_*`, `time_pre_isam_ms`, `pre_admission_hard_chi2_count`（必须为 0） |
 | optimize() 阶段 0 后 | `n_sf_*`, `n_imu`, `n_explicit_*`, `n_between_*`, `n_prior_*`, `n_zupt`, `n_deleted_slots` |
-| optimize() 阶段 2 后 | `update_ok/fail`, `exc_*`, `graph_*`, `hessian_*`, `error_*` |
+| GraphMutationPreflight 后 | `graph_preflight_*`, `preflight_missing_key`, `preflight_unconstrained_key`, `preflight_invalid_delete_slot` |
+| optimize() 阶段 2 后 | `update_ok/fail`, `exc_*`, `graph_*`, `hessian_*`, `error_*`, `shadow_rmse_multiplier`, `fallback_explicit_count` |
 | optimize() 结束后 | `time_*` |
 
 #### 因子注入验证
@@ -2554,6 +2741,29 @@ void verifyFactorInjection(const NonlinearFactorGraph& graph_before,
     }
 }
 ```
+
+#### GraphMutationPreflight 探针
+
+```cpp
+void verifyGraphMutationPreflight(const GraphMutationPreflightResult& r,
+    BackendProbe* p) {
+    if (r.ok) {
+        p->graph_preflight_ok++;
+        return;
+    }
+    p->graph_preflight_fail++;
+    p->preflight_missing_key += r.missing_keys.size();
+    p->preflight_unconstrained_key += r.unconstrained_new_keys.size();
+    p->preflight_invalid_delete_slot += r.invalid_delete_slots.size();
+
+    LOG(ERROR) << "[PROBE] GraphMutationPreflight failed: " << r.reason
+               << " missing_keys=" << r.missing_keys.size()
+               << " unconstrained_new_keys=" << r.unconstrained_new_keys.size()
+               << " invalid_delete_slots=" << r.invalid_delete_slots.size();
+}
+```
+
+`pre_admission_hard_chi2_count > 0` 是设计违规，不是普通 warning。出现一次就说明实现把 post-update 诊断误用成首次入图前硬拒绝，必须阻断合并。
 
 #### Smoother 状态快照 (异常触发)
 
@@ -2628,6 +2838,10 @@ struct BackendAlerts {
     bool hessian_dense = false;          // 🟡 sparsity < 0.5
     bool time_budget_exceeded = false;   // 🟡 time_total_ms > 50
     bool sf_count_mismatch = false;      // 🟡 graph_smart_factors != n_sf_total
+    bool graph_preflight_failed = false; // 🔴 graph_preflight_fail > 0
+    bool pre_admission_chi2_violation = false; // 🔴 入图前 hard chi2 被调用
+    bool shadow_regression = false;      // 🔴 shadow_rmse_multiplier > 2.0
+    bool fallback_looping = false;       // 🟡 fallback_explicit_count > 3
 };
 
 BackendAlerts checkBackendHealth(const BackendProbe& p) {
@@ -2638,6 +2852,10 @@ BackendAlerts checkBackendHealth(const BackendProbe& p) {
     a.error_ratio_spike = (p.error_ratio > 2.0);
     a.hessian_dense = (p.hessian_sparsity < 0.5);
     a.time_budget_exceeded = (p.time_total_ms > 50);
+    a.graph_preflight_failed = (p.graph_preflight_fail > 0);
+    a.pre_admission_chi2_violation = (p.pre_admission_hard_chi2_count > 0);
+    a.shadow_regression = (p.shadow_rmse_multiplier > 2.0);
+    a.fallback_looping = (p.fallback_explicit_count > 3);
     return a;
 }
 ```
@@ -2747,6 +2965,9 @@ struct LoopProbe {
                 "exp_n": 3, "exp_x": 8, "btw_s": 0, "btw_st": 0,
                 "p_p": 0, "p_v": 0, "p_b": 0, "zupt": 0, "del": 5},
     "isam2": {"ok": 1, "fail": 0, "indet": 0, "cheir": 0, "other": 0},
+    "gate": {"preflight_ok": 1, "preflight_fail": 0,
+             "missing_key": 0, "unconstrained_key": 0, "bad_slot": 0,
+             "pre_adm_chi2": 0, "shadow_rmse_x": 1.03, "fallback_exp": 0},
     "moba": {"exe": 1, "obs": 80, "iter": 4, "susp": 2},
     "graph": {"fac": 1347, "var": 352, "expl": 80, "sf": 203},
     "hessian": {"ele": 4512, "zero": 3200, "sp": 0.71},
@@ -2787,7 +3008,9 @@ void processKeyframe(const LocalGraphKeyframeInput& in) {
     auto ba = checkBackendHealth(bp);
 
     bool abnormal = fa.klt_crisis || la.sf_behind_camera ||
-                    ba.isam2_failure || ba.cheirality_recovery_fail;
+                    ba.isam2_failure || ba.cheirality_recovery_fail ||
+                    ba.graph_preflight_failed || ba.pre_admission_chi2_violation ||
+                    ba.shadow_regression;
 
     // 异常 → 全量 dump
     if (abnormal && cfg_.probe.dump_on_factor_failure) {
@@ -2831,6 +3054,10 @@ void processKeyframe(const LocalGraphKeyframeInput& in) {
 8. von Stumberg & Cremers, *DM-VIO: Delayed Marginalization Visual-Inertial Odometry*, RA-L 2022 — https://arxiv.org/abs/2201.04114
 9. Geneva et al., *OpenVINS: A Research Platform for Visual-Inertial Estimation*, ICRA 2020
 10. Leutenegger et al., *OKVIS2: Realtime Scalable Visual-Inertial SLAM with Loop Closure*, 2022 — https://arxiv.org/abs/2202.09199
+11. GTSAM issues: `#595`, `#1976`, `#2405`, `#2478` — SmartFactor / fixed-lag / iSAM2 mutation 已解决或已讨论的工程问题
+12. OpenVINS issues: `#70`, `#89`, `#310`, `#332`, `#525` — IMU span、chi²、时间偏移和 stereo feature 管线问题
+13. ORB-SLAM3 issues: `#284`, `#305`, `#406`, `#779`, `#929` — stereo-inertial 初始化、reset、外参/相机模型和局部 VI BA 问题
+14. VINS-Fusion issues/PRs: `#41`, `#57/#110`, `#147`, `#217`, `#259` — 时间同步、NaN/Inf、IMU 噪声/单位和 stereo+IMU drift 问题
 
 ## 十一、相关页面
 
@@ -2841,6 +3068,7 @@ void processKeyframe(const LocalGraphKeyframeInput& in) {
 - [[设计-双目VIO回环子系统]]
 - [[landmark-pipeline-design]]
 - [[VIO方案全景对比]]
+- [[factor-vio-implementation-pitfalls]]
 - [[因子图vs滤波]]
 - [[概念-IMU预积分]]
 - [[概念-Schur补与边缘化]]

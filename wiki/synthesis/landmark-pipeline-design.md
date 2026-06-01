@@ -2,7 +2,7 @@
 tags: [landmark, 路标, 因子图, GTSAM, VIO, PHAD, 双目, SmartFactor, PFB, 深度滤波, 边缘化]
 type: synthesis
 created: 2026-06-01
-updated: 2026-06-01
+updated: 2026-06-02
 sources:
   - raw/codes/Kimera-VIO/src/backend/RegularVioBackend.cpp
   - raw/codes/rpg_svo_pro_open/svo_direct/src/depth_filter.cpp
@@ -30,11 +30,15 @@ sources:
 
 ### 1.2 设计原则
 
-1. **路标必须作为显式变量参与优化**（当质量达标后）
-2. **质量门控在转换处硬性检查**，不允许半信半疑的路标进入因子图
+1. **路标必须作为显式变量参与优化**（当质量达标后），显式路径是生产基线，不得因为 SmartFactor 试验成功而删除
+2. **几何/身份/key-value 门控在转换处硬性检查**，但 chi2 不能作为首次入图前的硬拒绝条件
 3. **双目基线提供绝对尺度的初始深度**，避免单目三角化的尺度漂移
 4. **初始化期间（前 10 KF）所有路标保持显式**，不给 SmartFactor 退化窗口
 5. **借鉴 DM-VIO 延迟边缘化思想**——路标在被边缘化前应有充分收敛机会
+6. **GraphMutationPreflight 是晋升前置条件**——新增 `L(id)`、GenericStereoFactor、SmartFactor 删除 slot 必须作为同一批原子 mutation 通过检查
+7. **shadow/fallback 优先于直接替换**——SmartFactor promotion 策略先 shadow 记录结果，显式路标路径始终可回退
+
+`chi2` 的语义只属于优化后诊断：首次 admission / promotion 前可以计算重投影误差、深度范围、视差角、SVD 条件数、key/value 完备性，但不能用未优化的 IMU 预测位姿做 hard chi2 拒绝。PHAD 的 pre-admission chi2 gate 曾导致视觉因子饥饿，这是本设计明确禁止的反模式。
 
 ---
 
@@ -123,6 +127,8 @@ SMART_TRIAL → PROMOTING:
     (3) factor->point().valid() && !isDegenerate() && !isFarPoint() && !isOutlier()
     (4) 重投影误差均值 < max_mean_reproj_px (2.0 px)
     (5) 三角化方差 < max_triangulation_var (0.01 m², 仅逆深度参数化)
+    (6) GraphMutationPreflight 可证明后续 `L(id)` 与因子约束可原子入图
+  - 明确禁止: pre-admission hard chi2。chi2 需要优化后的图状态，只能在 EXPLICIT 后裁决。
   - 来源: Kimera-VIO RegularVioBackend::updateLmkIdIsSmart (L870-L957)
 
 SMART_TRIAL → SMART_RETRY:
@@ -136,17 +142,17 @@ SMART_TRIAL / SMART_RETRY → CULLED:
   - 触发: 连续 missed > max_consecutive_missed (5)，或 track 断裂 > max_track_gap_frames
 
 PROMOTING → EXPLICIT:
-  - 触发: convertSmartToProjectionFactor() 成功
+  - 触发: convertSmartToProjectionFactor() 成功 + GraphMutationPreflight 通过
   - 动作: (1) 从 SmartFactor 提取 Point3 初值 (2) 创建 Point3 变量加入 Values
          (3) 为所有历史观测创建 GenericStereoFactor (4) 删除 SmartFactor
   - 来源: Kimera-VIO RegularVioBackend::convertSmartToProjectionFactor (L635-L730)
 
 PROMOTING → SMART_RETRY:
-  - 触发: 转换失败（Point3 无效、观测不足等）
-  - 回退: 保留 SmartFactor
+  - 触发: 转换失败（Point3 无效、观测不足、preflight 失败、slot/key 不一致等）
+  - 回退: 保留 SmartFactor；若处于 shadow 模式，只记录失败诊断，不修改主图
 
 EXPLICIT → STABLE:
-  - 触发: 连续 K（3）次优化后 chi2 < chi2_threshold (5.991, 95% quantile, dof=2)
+  - 触发: 连续 K（3）次优化后 chi2 < chi2_threshold (7.815, 95% quantile, dof=3)
   - 动作: 标记为 stable，降低后续 chi2 检查频率
 
 EXPLICIT → REMEDIATING:
@@ -252,12 +258,17 @@ def is_converged(state):
 | C5 | 三角化数值稳定性 | SVD 条件数 < 1e6 | 物理：条件数过大表示近乎退化 |
 | C6 | 深度 > 最小深度 | > 0.3 m (min_valid_depth) | 物理：相机最小对焦距离 |
 | C7 | 深度 < 最大深度 | < 50 m (max_valid_depth_smart) | 物理：b=12cm, f=400px → disparity=1px → Z≈50m |
+| C8 | GraphMutationPreflight | 所有 factor keys 存在于 `current_values ∪ new_values`，新增 `L(id)` 至少有一条因子约束，delete slot 有效 | PHAD key/value 存储失败、Ghost landmark 秩亏防线 |
+
+不加入 pre-admission chi2 门控。首次 chi2 评价发生在 `isam2.update()` 后，用于 `EXPLICIT/STABLE/REMEDIATING/CULLED` 状态迁移；入图前若需要评分，只能记录 `pre_admission_chi2_soft_score`，不得拒绝观测。
 
 ### 4.2 晋升伪代码
 
 ```python
 # 严格遵循 Kimera-VIO RegularVioBackend 的 convertSmartToProjectionFactor 模式
-# raw/codes/Kimera-VIO/src/backend/RegularVioBackend.cpp:L635-L730
+# raw/codes/Kimera-VIO/src/backend/RegularVioBackend.cpp:L635-L670   # 有效点检查 + L(id) 初值
+# raw/codes/Kimera-VIO/src/backend/RegularVioBackend.cpp:L671-L710   # 历史观测转显式因子 + delete slot
+# raw/codes/Kimera-VIO/src/backend/RegularVioBackend.cpp:L712-L730   # smart 管理表清理 + 失败返回
 
 def promote_landmark(lmk_id, smart_factor, graph_state):
     """SmartFactor → Explicit GenericStereoFactor + Point3 variable"""
@@ -298,9 +309,24 @@ def promote_landmark(lmk_id, smart_factor, graph_state):
     if smart_factor.slot_in_graph != -1:
         graph_state.delete_slots.push_back(smart_factor.slot_in_graph)
     graph_state.old_smart_factors.erase(lmk_id)
-    
+
+    # 7. 原子入图前检查：不能出现 L(id) 已插入但无因子、因子引用不存在 key、slot 误用 LandmarkId 等情况
+    preflight = preflight_graph_mutation(
+        current_values=graph_state.current_values,
+        new_values=graph_state.new_values,
+        new_factors=graph_state.new_factors,
+        delete_slots=graph_state.delete_slots,
+        required_new_key=lmk_key)
+    if not preflight.ok:
+        rollback_pending_mutation(lmk_key, factors_for_this_lmk, smart_factor.slot_in_graph)
+        if graph_state.shadow_mode:
+            record_shadow_failure(lmk_id, preflight.reason)
+        return Failure("Graph mutation preflight failed: " + preflight.reason)
+
     return Success(point3, len(factors_for_this_lmk))
 ```
+
+`preflight_graph_mutation()` 是晋升的硬门槛，但它只检查图结构一致性，不评估优化后残差。PHAD 的经验表明，图结构错误会立即导致秩亏或异常；而 chi2 残差必须等变量进入图并完成一次优化后才有统计意义。
 
 ### 4.3 晋升后的本地 BA（恢复 PFB 的 local_ba 模式）
 
@@ -334,7 +360,7 @@ def local_ba_after_promotion(lmk_id, graph_state, max_connected_poses=10):
     
     # Chi2 验证
     chi2 = compute_chi2(local_graph, result, lmk_key)
-    if chi2 > CHI2_95_DOF2:  # 5.991
+    if chi2 > CHI2_95_DOF3:  # 7.815, GTSAM StereoPoint2(uL,uR,v)
         # 标记 outlier observations
         mark_outlier_observations(lmk_id, local_graph, result)
     
@@ -347,6 +373,10 @@ def local_ba_after_promotion(lmk_id, graph_state, max_connected_poses=10):
 ---
 
 ## 5. 后优化异常值剔除（Chi2-Based）
+
+本节只描述 **post-update 诊断**，不参与首次 admission / promotion 的硬拒绝。`chi2` 必须基于 `isam2.update()` 后的优化结果计算；如果在入图前用 IMU 预测位姿或未优化位姿计算 hard chi2，容易在快速运动、弱纹理、小视差场景中误杀好路标，形成 PHAD 复盘中的特征饥饿链路。
+
+推荐状态响应为三段式：第一次超阈值只记 warning；连续超阈值进入 `REMEDIATING` 并降权；持续超阈值才进入 `CULLED`。低纹理或激烈运动 profile 可以临时放宽阈值，但必须写入探针日志，不能静默改变全局阈值。
 
 ### 5.1 单路标 Chi2 测试
 
@@ -375,15 +405,15 @@ def post_update_outlier_check(graph, result, landmark_states):
             error = factor.unwhitenedError(result)
             noise = factor.noiseModel()
             whitened = noise.whiten(error)
-            chi2_i = whitened.squaredNorm()  # dof=2 for stereo
+            chi2_i = whitened.squaredNorm()  # dof=3 for GTSAM StereoPoint2(uL,uR,v)
             total_chi2 += chi2_i
-            total_dof += 2
+            total_dof += 3
         
         # 3. 每观测平均 chi2
-        avg_chi2_per_obs = total_chi2 / (total_dof / 2) if total_dof > 0 else 999
+        avg_chi2_per_obs = total_chi2 / (total_dof / 3) if total_dof > 0 else 999
         
         # 4. 状态机转换
-        if avg_chi2_per_obs > CHI2_95_DOF2:  # 5.991
+        if avg_chi2_per_obs > CHI2_95_DOF3:  # 7.815
             state.consecutive_bad_chi2 += 1
             state.consecutive_good_chi2 = 0
         else:
@@ -436,19 +466,21 @@ def post_update_outlier_check(graph, result, landmark_states):
 |------|-------------|---------|---------|---------|
 | CANDIDATE | 无 | — | — | 无 |
 | DEPTH_FILTER | 无（纯滤波器） | — | — | 内部 μ, σ², a, b |
-| SMART_TRIAL | `SmartStereoProjectionPoseFactor` | `Isotropic::Sigma(2, 1.5)` | 无（内部 outlier rejection） | 隐式（内部三角化） |
+| SMART_TRIAL | `SmartStereoProjectionPoseFactor` | `Isotropic::Sigma(3, 3.0)` | 无（内部 outlier rejection） | 隐式（内部三角化） |
 | PROMOTING | 过渡态 | — | — | 临时 Point3 |
-| EXPLICIT | `GenericStereoFactor<Pose3, Point3>` | `Isotropic::Sigma(2, 1.5)` | `Huber(k=3.0)` | `Symbol('l', lmk_id)` → `Point3` |
-| STABLE | `GenericStereoFactor<Pose3, Point3>` | `Isotropic::Sigma(2, 1.5)` | `Huber(k=1.345)` | `Symbol('l', lmk_id)` → `Point3` |
-| REMEDIATING | `GenericStereoFactor<Pose3, Point3>` | `Isotropic::Sigma(2, 1.5)` | `Huber(k=0.5)` | `Symbol('l', lmk_id)` → `Point3` |
+| EXPLICIT | `GenericStereoFactor<Pose3, Point3>` | `Isotropic::Sigma(3, 1.5)` | `Huber(k=3.0)` | `Symbol('l', lmk_id)` → `Point3` |
+| STABLE | `GenericStereoFactor<Pose3, Point3>` | `Isotropic::Sigma(3, 1.5)` | `Huber(k=1.345)` | `Symbol('l', lmk_id)` → `Point3` |
+| REMEDIATING | `GenericStereoFactor<Pose3, Point3>` | `Isotropic::Sigma(3, 1.5)` | `Huber(k=0.5)` | `Symbol('l', lmk_id)` → `Point3` |
 | MARGINALIZED | `LinearContainerFactor` (HessianFactor) | N/A（已线性化） | 无 | 被 Schur 补消除 |
 | CULLED | 无 | — | — | 无 |
 
 ### 6.1 噪声模型详述
 
 ```
-stereo_noise = noiseModel::Isotropic::Sigma(2, 1.5)
-# 2 维（水平 uL-uR 视差 + 垂直 v 坐标）
+smart_stereo_noise = noiseModel::Isotropic::Sigma(3, 3.0)
+explicit_stereo_noise = noiseModel::Isotropic::Sigma(3, 1.5)
+# GTSAM GenericStereoFactor / SmartStereoProjectionPoseFactor 使用 StereoPoint2(uL,uR,v)，残差为 3 维
+# 如果实现改成自定义 (disparity, v) 2 维残差，必须同步替换因子类型、噪声维度和 chi2 阈值
 # σ = 1.5 px ⟹ 约 95% 的观测落在 ±3 px 内
 # 对应到深度空间：σ_Δz ≈ Z²/(f·b) · σ_disparity
 #   Z=5m, f=400px, b=0.12m → σ_Δz ≈ 25²/(400·0.12)·1.5 ≈ 2.0 px → σ_Δz ≈ 0.16m
@@ -491,16 +523,27 @@ if num_keyframes <= INITIALIZATION_KF_COUNT:  # 10
 | `MAX_VALID_DEPTH_SMART` | 50.0 | m | 物理：b=12cm, f=400px → d=1px → Z≈50m | 30-80 |
 | `MAX_PARALLAX_PX` | 150 | px | Kimera-VIO ✓ | 100-200 |
 | `MAX_RETRY_OBS` | 10 | obs | 经验：超过此数不再等 | 8-15 |
+| `SMART_FACTOR_NOISE_SIGMA` | 3.0 | px | Kimera EuRoC `smartNoiseSigma_`，试用期更宽松 | 2.0-4.0 |
+| `SMART_FACTOR_RETRIANGULATION_THRESHOLD` | 1e-3 | — | 沿用 Kimera 较宽阈值；GTSAM 默认 1e-5 更严 | 1e-5-1e-3 |
 | **显式因子** | | | | |
 | `STEREO_NOISE_SIGMA` | 1.5 | px | PHYSICAL: pixel accuracy | 1.0-2.0 |
 | `HUBER_K_EXPLICIT` | 3.0 | — | 经验：初始晋升弱鲁棒 | 2.0-5.0 |
 | `HUBER_K_STABLE` | 1.345 | — | 统计：95% efficiency of normal | 1.0-2.0 |
 | `HUBER_K_REMEDIATING` | 0.5 | — | 经验：极低影响 | 0.3-0.8 |
 | **Chi2 监测** | | | | |
-| `CHI2_95_DOF2` | 5.991 | — | 统计：χ²(2, 0.95) | — |
+| `CHI2_95_DOF3` | 7.815 | — | 统计：χ²(3, 0.95)，GTSAM StereoPoint2(uL,uR,v) | — |
 | `CONSECUTIVE_GOOD_FOR_STABLE` | 3 | frames | 经验：3 帧连续良好 | 2-5 |
 | `CONSECUTIVE_BAD_FOR_REMEDIATE` | 2 | frames | 经验：2 帧连续异常 | 1-3 |
 | `FOUND_RATIO_THRESH` | 0.25 | — | ORB-SLAM3 ✓ | 0.15-0.35 |
+| **PHAD 防退化开关** | | | | |
+| `ENABLE_SHADOW_PROMOTION` | true | bool | 新 promotion 策略先并跑记录，不驱动主图 | true |
+| `ENABLE_EXPLICIT_FALLBACK` | true | bool | 显式路标路径为生产基线 | true |
+| `ALLOW_PRE_ADMISSION_CHI2_GATE` | false | bool | 禁止首次入图前 hard chi2 | false |
+| `GRAPH_PREFLIGHT_REQUIRED` | true | bool | key/value/slot/约束覆盖检查 | true |
+| `scenario_threshold_profile` | euroc / low_texture / fast_motion / slow_parallax | enum | 数据集级阈值 profile，禁止把 EuRoC 阈值当作全局真理 | euroc |
+| `CHI2_PROFILE_EUROC` | χ²₃=7.815 | — | EuRoC 室内、正常纹理 | 固定基准 |
+| `CHI2_PROFILE_LOW_TEXTURE` | 1.5× 基准后验阈值 | — | 弱纹理、低特征数 | 需探针记录 |
+| `CHI2_PROFILE_FAST_MOTION` | 1.25× 基准后验阈值 | — | 快速运动、IMU 预测误差大 | 需 smoke 验证 |
 | **边缘化** | | | | |
 | `MIN_OBS_BEFORE_MARG` | 5 | obs | 经验：路标被边缘化前的最少观测数 | 5-10 |
 | `DELAY_MARG_FRAMES` | 3 | frames | DM-VIO思想：给新路标额外收敛时间 | 2-5 |
@@ -516,7 +559,8 @@ if num_keyframes <= INITIALIZATION_KF_COUNT:  # 10
 ```
 输入合约:
   FeatureTrack {
-    LandmarkId track_id;                    # 持久 ID
+    TrackId track_id;                       # 前端短期轨迹 ID，不能当作地图路标身份
+    optional<LandmarkId> landmark_id;        # 解析/分配到 LandmarkRecord 后填写，地图级持久 ID
     vector<pair<FrameId, StereoPoint2>> obs; # 每帧的双目观测 (uL, uR, v)
     FrameId first_frame;                    # 首次观测帧
     FrameId last_frame;                      # 最后观测帧
@@ -597,6 +641,10 @@ if num_keyframes <= INITIALIZATION_KF_COUNT:  # 10
 | F8 | **初始化期路标爆炸** | 前 10 KF 路标数失控 | 初始化期所有路标 bypass SmartFactor | 初始化期仍然运行深度滤波器收敛检查，只晋升收敛的种子 |
 | F9 | **iSAM2 变量泄漏** | 被 CULLED 的 Point3 仍留在 Values 中 | 未正确调用 `graph_state.delete_variables` | 实现 CULLED 状态机的析构清理逻辑 |
 | F10 | **SmartFactor 内部离群点累积** | 内部 outlier 标志反复切换 | 边缘化帧导致观测被移除，剩余观测含噪声 | 限制 SmartFactor 最小观测数 ≥ 3，低于此数时转为 SMART_RETRY |
+| F11 | **pre-admission hard chi2 误杀好路标** | KF 数正常但视觉因子数骤降，后端约束饥饿 | 用未优化 IMU 预测姿态在首次入图前硬拒绝 | 禁用入图前 hard chi2，只允许软评分；post-update 后再进入 REMEDIATING/CULLED |
+| F12 | **Graph mutation 部分插入** | `L(id)` 有值无因子、或因子引用不存在 key，触发秩亏/异常 | promotion 中插入 Point3、删除 SmartFactor、添加 GenericFactor 不原子 | `GraphMutationPreflight` 失败则整批 rollback 或 shadow-only |
+| F13 | **Key/Value 命名空间混淆** | 缓存 3D/pose 与 iSAM2 最新估计脱节，回环或重线性化后投影错误 | 长期保存 `Pose3/Point3` 值而非查询 key | 跨模块传 `KfId/Key` 优先；缓存值必须带 snapshot/update id |
+| F14 | **无 shadow 的直接替换** | 新 SmartFactor/promotion 策略退化后无法快速恢复 | 删除显式 fallback 或默认启用新路径 | 显式路径永久保留；新路径先 shadow，比对 RMSE/异常后再驱动主图 |
 
 ### 9.2 全局健康监控
 
@@ -626,15 +674,17 @@ def global_health_monitor(landmark_states, optimization_history):
 
 ## 10. 实现顺序与集成检查点
 
-| 阶段 | 功能 | 验证方式 |
-|------|------|---------|
-| 1 | 深度滤波器（贝叶斯更新+收敛判定） | 单元测试：已知深度真值的模拟极线匹配 |
-| 2 | SmartFactor 创建 + 更新（复用现有代码） | 已有 Kimera-VIO 测试覆盖 |
-| 3 | 晋升门控 + `convertSmartToProjectionFactor` | 含 ground truth 的数据集上对比晋升前后的路标深度误差 |
-| 4 | Chi2 监测 + EXPLICIT/STABLE/REMEDIATING 状态机 | 单序列上验证状态转换逻辑 |
-| 5 | 边缘化协调（延迟边缘化 + Schur 补） | 验证边缘化后剩余路标的 chi2 不恶化 |
-| 6 | 初始化特殊处理（前 10 KF 全显式） | EuRoC V1_01 对比 SmartFactor-only vs 新管线 |
-| 7 | 全局健康监控 + 参数自适应 | 16 序列全量回归测试 |
+| 阶段 | 功能 | 验证方式 | Gate / 回滚条件 |
+|------|------|---------|----------------|
+| 0 | 显式路标基线（无 SmartFactor 驱动主图） | 50 KF smoke：无 crash、无 `ValuesKeyDoesNotExist`、视觉因子数稳定 | 失败则不进入 SmartFactor 工作 |
+| 1 | 深度滤波器（贝叶斯更新+收敛判定） | 单元测试：已知深度真值的模拟极线匹配 | 收敛率过低则只调深度参数，不改后端 |
+| 2 | SmartFactor 创建 + 更新（shadow-only） | 与显式基线并跑，记录退化、远点、outlier 比例 | shadow RMSE > 显式基线 2× 或异常率 >30% 则保持禁用 |
+| 3 | 晋升门控 + `GraphMutationPreflight` | 人工构造 slot/key 缺失、重复插入、无约束 `L(id)` 测试 | 任一 preflight 用例失败，禁止 promotion 入主图 |
+| 4 | `convertSmartToProjectionFactor` 驱动主图 | V1_01 前 50 KF smoke + RMSE ≤ 显式基线 2× | 失败立即回退 `ENABLE_EXPLICIT_FALLBACK` |
+| 5 | Chi2 监测 + EXPLICIT/STABLE/REMEDIATING 状态机 | 单序列上验证 post-update 状态转换；确认入图前 hard chi2 计数为 0 | 发现 pre-admission hard chi2 调用即阻断合并 |
+| 6 | 边缘化协调（延迟边缘化 + Schur 补） | 验证边缘化后剩余路标的 chi2 不恶化 | chi2 或 RMSE 恶化超过 20% 回滚 |
+| 7 | 初始化特殊处理（前 10 KF 全显式） | EuRoC V1_01 对比显式基线、SmartFactor shadow、混合路径 | 混合路径不得差于显式基线 0.15m / 2× gate |
+| 8 | 多场景 profile 验证 | low_texture / fast_motion / slow_parallax 控制变量矩阵 | 单序列改善但其他场景恶化则不得设为默认 |
 
 ---
 
@@ -642,7 +692,7 @@ def global_health_monitor(landmark_states, optimization_history):
 
 | 参考系统 | 关键文件 | 借鉴的机制 |
 |---------|---------|-----------|
-| Kimera-VIO | `RegularVioBackend.cpp:L478-L504, L635-L730, L825-L865, L870-L957, L963-L976` | SmartFactor→Explicit 晋升全流程 |
+| Kimera-VIO | `RegularVioBackend.cpp:L478-L504, L635-L670, L671-L710, L712-L730, L825-L865, L870-L957, L963-L976` | SmartFactor→Explicit 晋升全流程 |
 | SVO Pro | `depth_filter.cpp:L255-L365, L367-L499, L501-L552, L580-L596` | 贝叶斯深度滤波器 |
 | ORB-SLAM3 | `LocalMapping.cc:L346-L385`, `MapPoint.cc:L216-L239` | MapPointCulling, found_ratio, mbBad |
 | DM-VIO | `DelayedMarginalization.h:L35-L167`, `Marginalization.cpp:L30-L180` | 延迟边缘化, Schur 补实现 |
@@ -676,3 +726,4 @@ OKVIS2 (Leutenegger, 2022) 提出了一种**可逆边缘化**机制：当路标�
 - [[算法-ORB-SLAM3]]
 - [[算法-DM-VIO]]
 - [[GTSAM SLAM 与视觉因子 API]]
+- [[factor-vio-implementation-pitfalls]]
