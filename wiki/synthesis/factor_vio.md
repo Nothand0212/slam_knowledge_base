@@ -44,7 +44,7 @@ sources:
 │ │NCC立体匹配 │  │ │ Uniform混合)   │   │ │分组一致性确认    │    │
 │ │双轮RANSAC  │  │ ├────────────────┤   │ └────────┬─────────┘    │
 │ │关键帧决策  │  │ │SmartFactor试用  │   │          │              │
-│ │特征老化    │  │ │(隐式路标)      │   │ 几何验证: 3D-2D PnP    │
+│ │特征老化    │  │ │(隐式几何)      │   │ 几何验证: 3D-2D PnP    │
 │ └───────────┘  │ │┌──────────────┐│   │          │              │
 │                │ ││clone-and-add ││   │          ▼              │
 │ FrontendOutput │ ││slot管理      ││   │ 回环注入(BetweenFactor) │
@@ -76,15 +76,17 @@ sources:
 └────────────────┴──────────────────────┴──────────────────────────┘
 
 共享数据结构:
-  FeatureDatabase      (前端写 → 路标管线读)
-  KeyframeDatabase     (路标管线写 → 回环读)
-  ExplicitLandmarkMap  (路标管线写 → 回环读)
+  FeatureDatabase       (Frontend 写 TrackId 级观测)
+  LandmarkRegistry      (LandmarkPipeline 拥有 LandmarkRecord 身份+生命周期)
+  TrackLandmarkMap      (TrackId → LandmarkId, merge 后可多 TrackId 指向同一 LandmarkId)
+  KeyframeDatabase      (路标管线写 → 回环读)
+  ExplicitLandmarkMap   (Backend 视图: LandmarkId → L(id), Point3, covariance)
   BackendSnapshotBuffer (Backend 写 → Tracking 读, atomic shared_ptr, 只读快照)
         │
         │  Backend publishSnapshot() 写入:
         │    optimized_navstate  (pose + velocity)
         │    optimized_bias      (IMU bias)
-        │    active_landmarks    (3D 位置 + 不确定性)
+        │    active_landmarks    (由 LandmarkRecordStore + Backend state 派生的可投影稳定路标)
         │    active_keyframes    (窗口内 KF)
         │    culled_landmarks    (已剔除路标 ID)
         ▼
@@ -108,36 +110,86 @@ INITIALIZED:
   └── GLOBAL_BA (累计3次回环或漂移>0.5m触发)
 ```
 
-### 1.3 路标状态机
+### 1.3 LandmarkRecord 身份系统
+
+核心约束：**几何可以隐式，身份必须显式**。SmartFactor 只隐藏 `Point3` 几何变量；系统仍必须用 `LandmarkRecord` 维护同一个物理路标的身份、观测历史、生命周期、质量统计和跨线程共享关系。
+
+```cpp
+struct ObservationRef {
+    KfId kf_id;
+    TrackId track_id;
+    int feature_idx;
+    gtsam::StereoPoint2 stereo_meas;
+    double timestamp;
+    ObservationQuality quality;       // RANSAC / KLT / stereo / reprojection 质量
+};
+
+struct LandmarkQuality {
+    int total_observations = 0;
+    int visible_count = 0;             // 被 local-map projection 预测可见次数
+    int found_count = 0;               // 实际匹配成功次数
+    int consecutive_outlier_count = 0;
+    double max_parallax_deg = 0.0;
+    double mean_reprojection_px = 0.0;
+    double latest_chi2 = 0.0;
+    double confidence = 0.0;           // [0,1], 用于投影/回环/PnP/晋升优先级
+};
+
+struct LandmarkRecord {
+    LandmarkId id;                     // map 内全局唯一, 终身不复用
+    TrackId primary_track_id;          // 前端当前主 track
+    std::vector<TrackId> aliases;      // merge / re-track 后的别名 track
+    LandmarkState state;
+    std::vector<ObservationRef> observations;
+
+    std::optional<gtsam::FactorIndex> smart_factor_slot; // SMART_TRIAL 时使用
+    std::optional<gtsam::Key> point_key;                 // EXPLICIT 后为 L(id)
+    std::optional<gtsam::Point3> position_world;         // 后端优化/三角化结果缓存
+
+    LifecycleOwner owner;              // Frontend / LandmarkPipeline / Backend / Loop
+    LandmarkQuality quality;
+};
+```
+
+**所有权规则**：
+
+- Frontend 只拥有短期 `TrackId` 与像素轨迹；它不能分配或复用 `LandmarkId`。
+- LandmarkPipeline 拥有 `LandmarkRegistry`、`TrackLandmarkMap` 与 `LandmarkRecord.state`，负责把稳定 track 解析/分配为 `LandmarkId`。
+- Backend 拥有因子槽位、`L(id)` 几何变量和优化后的 3D/covariance；晋升时只创建 `L(id)`，不创建新 `LandmarkId`。
+- LoopClosing 只读 `LandmarkRecord` 与共视图，可请求提升/融合，但不直接分配 ID。
+
+因此：`TrackId` 是前端短期特征轨；`LandmarkId` 是地图级长期身份；`Point3` 只是某些状态下存在的几何表达。
+
+### 1.4 路标状态机
 
 ```
                     ┌─────────┐
-      新特征观测 →  │CANDIDATE│  (仅KLT跟踪,无3D)
+      新特征观测 →  │CANDIDATE│  (LandmarkRecord已存在, 仅KLT跟踪,无可信3D)
                     └────┬────┘
                          │ 立体匹配成功 + 深度有效
                          ▼
                     ┌────────────┐
-                    │DEPTH_FILTER│  (贝叶斯深度滤波)
+                    │DEPTH_FILTER│  (同一LandmarkId, 贝叶斯深度滤波)
                     └─────┬──────┘
                           │ 深度方差收敛
                           ▼
                     ┌────────────┐
-                    │SMART_TRIAL │  (SmartStereoFactor, 隐式路标)
+                    │SMART_TRIAL │  (同一LandmarkId, SmartFactor隐藏Point3几何)
                     └─────┬──────┘
                           │ 晋升门控通过 (≥4观测, 视差>3°, 重投影<2px, SVD条件数<1e6)
                           ▼
                     ┌────────────┐
-                    │ PROMOTING  │  (创建Point3 + GenericStereoFactor)
+                    │ PROMOTING  │  (创建L(id)+Point3, 不创建新LandmarkId)
                     └─────┬──────┘
                           │ chi²后验通过
                           ▼
                     ┌────────────┐
-                    │  EXPLICIT  │  (显式路标, 参与iSAM2迭代优化)
+                    │  EXPLICIT  │  (LandmarkRecord持有point_key=L(id), 参与iSAM2)
                     └─────┬──────┘
                           │ 连续N帧chi²通过 + 观测数充足
                           ▼
                     ┌────────────┐      ┌─────────────┐
-                    │   STABLE   │ ───→ │MARGINALIZED │ (被边缘化出窗口)
+                    │   STABLE   │ ───→ │MARGINALIZED │ (record保留为历史, graph变量可被边缘化)
                     └─────┬──────┘      └─────────────┘
                           │ 连续异常
                           ▼
@@ -147,9 +199,11 @@ INITIALIZED:
                           │ 恢复失败
                           ▼
                     ┌────────────┐
-                    │  CULLED    │ (永久删除)
+                    │  CULLED    │ (tombstone, ID永久不复用)
                     └────────────┘
 ```
+
+生命周期状态由 `LandmarkRecord` 唯一拥有；SmartFactor、GenericStereoFactor、`L(id)` 只是当前后端几何表示，不拥有路标身份。
 
 ---
 
@@ -298,12 +352,20 @@ struct BackendSnapshot {
     gtsam::imuBias::ConstantBias optimized_bias; // 最新 IMU 偏置
 
     // === 活跃局部地图 ===
-    // 仅包含 STABLE 状态的显式路标 (不含 SmartFactor 试用期)
+    // 仅包含 EXPLICIT/STABLE 且可安全投影的 LandmarkRecord。
+    // 不包含纯 SMART_TRIAL：SmartFactor 有内部三角化缓存，但没有后端拥有的 Point3 变量。
+    // active = 可用于 Tracking local-map projection / 3D-2D matching，
+    //          不是 registry 中的所有路标。
     struct ActiveLandmark {
+        LandmarkId id;
         gtsam::Point3 position_world;     // 世界系 3D 坐标
         gtsam::Vector3 position_sigma;    // 位置不确定性 (iSAM2 边际协方差对角)
+        LandmarkState state;              // EXPLICIT 或 STABLE
+        std::vector<TrackId> active_track_ids;      // 当前仍在前端活跃的 track 别名
+        std::vector<KfId> observing_keyframes;      // 用于共视图/PnP邻域
         int total_observations;           // 总观测数
-        LandmarkId id;
+        double covisibility_score;        // 与当前局部窗口的共视强度
+        double confidence;                // [0,1], 投影/PnP/回环候选门控
         bool is_outlier_suspect;          // chi² suspect 标记
     };
     std::vector<ActiveLandmark> active_landmarks;
@@ -367,9 +429,10 @@ void consumeBackendSnapshot(const BackendSnapshot& snap) {
     //       if 在视野内 and 重投影误差 < 阈值:
     //           建立 3D-2D 匹配 → 增加当前帧的路标观测
 
-    // 4. CULLED 路标: 清理前端持有的已淘汰路标引用
+    // 4. CULLED 路标: 通过 LandmarkRegistry 清理所有关联 TrackId
     for (auto id : snap.culled_landmarks) {
-        frontend_track_map_.erase(id);  // 不再跟踪该 track
+        landmark_registry_.markCulled(id);          // tombstone, LandmarkId 不复用
+        track_landmark_map_.eraseTracksForLandmark(id);
     }
 }
 ```
@@ -402,9 +465,11 @@ void consumeBackendSnapshot(const BackendSnapshot& snap) {
    - Backend 卡住时，Tracking 不依赖过期活跃路标做 3D-2D 投影匹配
 
 4. Track/Landmark ID 稳定性:
-   - LandmarkId 在 Backend 中不可变 (SmartFactor 晋升时分配, 终身不变)
-   - Tracking 中的 track_id 不应与 Backend 的 LandmarkId 混用
-   - 映射: track_id → LandmarkId 由前端维护, 晋升时建立
+   - `LandmarkId` 在特征轨首次成为持久候选 `LandmarkRecord` 时分配，终身不变且不复用。
+   - SmartFactor 晋升只分配几何变量 `L(id)`，复用已有 `LandmarkId`。
+   - `TrackId` 是前端短期轨迹 ID；`LandmarkId` 是地图级长期身份，两者禁止混用。
+   - `TrackId → LandmarkId` 在 `DEPTH_FILTER` / `SMART_TRIAL` 前建立，不等到 promotion。
+   - merge / re-track 后允许多个 `TrackId` alias 指向同一 `LandmarkId`。
 ```
 
 #### 2.2.5 与 ORB-SLAM3 对照
@@ -498,7 +563,8 @@ struct FrontendOutput {
 };
 
 struct FeatureTrack {
-    uint64_t id;                    // 全局唯一track ID
+    TrackId track_id;               // 前端短期轨迹 ID, 全局单调递增
+    std::optional<LandmarkId> landmark_id;  // 已解析到 LandmarkRecord 后填写
     Vector2 pixel_pt;              // 当前帧左目像素
     Vector3 normalized_pt;         // 去畸变归一化坐标 (z=1)
     Vector3 prev_normalized_pt;    // 上一帧归一化坐标
@@ -512,6 +578,8 @@ struct FeatureTrack {
     Vector3 prev_kf_3d;           // 上一关键帧的3D点 (相机系)
 };
 ```
+
+新检测到的前端 track 初始只有 `TrackId`。LandmarkPipeline 在深度滤波准入前解析或分配 `LandmarkId`，之后发往 Backend 的观测应同时携带 `track_id` 与 `landmark_id`。`PendingLandmark` 引用的是 `LandmarkId`，不能把原始 `TrackId` 当作地图路标身份。
 
 ---
 
@@ -559,7 +627,7 @@ function depthFilterUpdate(seed, frame_obs):
 
 ### 3.2 SmartFactor试用期 (SMART_TRIAL状态)
 
-路标在试用期内以 `SmartStereoProjectionPoseFactor` 形式存在于因子图中。
+路标在试用期内的**几何约束**以 `SmartStereoProjectionPoseFactor` 形式存在于因子图中；路标身份仍由 `LandmarkRecord` 显式维护。也就是说，隐式的是 `Point3` 几何变量，不是 `LandmarkId`、观测历史或生命周期。
 
 **因子参数**：
 
@@ -582,13 +650,15 @@ auto noise = gtsam::noiseModel::Isotropic::Sigma(3, 3.0);  // 3px立体噪声
 
 ```cpp
 struct SmartFactorSlot {
+    LandmarkId id;                         // 所属 LandmarkRecord.id
     gtsam::FactorIndex slot;              // -1=未入图, >=0=图中的槽位
     SmartStereoFactor::shared_ptr factor;
 };
 
 // 每关键帧处理:
 delete_slots = [];
-for each active_smart_landmark:
+for each record where record.state == SMART_TRIAL:
+    lmk_id = record.id;
     old = old_smart_factors[lmk_id];
     new_sf = clone(old.factor);           // 拷贝已有观测
     new_sf->add(stereo_meas, pose_key, K); // 追加新观测
@@ -609,7 +679,7 @@ for i, lmk_id in enumerate(smart_factor_order):
 ### 3.3 晋升门控 (SMART_TRIAL → PROMOTING)
 
 ```
-function shouldPromote(lmk_id, smart_factor, current_estimate):
+function shouldPromote(record, smart_factor, current_estimate):
     // G1: 最少观测数
     if smart_factor.numObservations() < min_obs_for_promotion (4):
         return false
@@ -659,12 +729,17 @@ function shouldPromote(lmk_id, smart_factor, current_estimate):
 ### 3.4 晋升操作 (PROMOTING → EXPLICIT)
 
 ```cpp
-function promoteLandmark(lmk_id, smart_factor, current_estimate):
+function promoteLandmark(record, smart_factor, current_estimate):
+    if record.point_key.has_value():
+        return ALREADY_EXPLICIT  // 幂等: 不重复分配 L(id)
+
+    lmk_id = record.id
+
     // 1. 从当前估计三角化路标3D位置
     point3d = smart_factor.triangulate(current_estimate).get()
     
-    // 2. 分配GTSAM变量key
-    lmk_key = L(next_lmk_id++)
+    // 2. 创建GTSAM几何变量key: 使用已有 LandmarkId, 不分配新身份
+    lmk_key = L(record.id)
     
     // 3. 创建显式因子 (替换旧SmartFactor)
     for each obs in smart_factor.observations():
@@ -681,8 +756,11 @@ function promoteLandmark(lmk_id, smart_factor, current_estimate):
     delete_slots.push(old_slot)
     old_smart_factors.erase(lmk_id)
     
-    // 5. 注册显式路标
-    explicit_landmarks[lmk_id] = {lmk_key, point3d, EXPLICIT, 0}
+    // 5. 更新共同身份记录 + 注册显式路标
+    record.point_key = lmk_key
+    record.position_world = point3d
+    record.state = EXPLICIT
+    explicit_landmarks[record.id] = {lmk_key, point3d, EXPLICIT, 0}
     
     // 6. 插入初始值
     new_values.insert(lmk_key, point3d)
@@ -725,6 +803,37 @@ function postUpdateOutlierCheck(isam2_result, explicit_landmarks):
 | landmark_distance_threshold | 20.0 m (Euroc YAML: 10.0) | Kimera header默认(20.0), Euroc覆盖为10.0 |
 | retriangulation_threshold | 1e-3 | Kimera |
 | max_feature_track_age | 25 KFs | Kimera |
+
+### 3.7 共视与置信度指标
+
+共视关系基于共享 `LandmarkId`，不是共享 `TrackId`。`TrackId` 可能因重跟踪、merge 或 alias 发生变化；`LandmarkId` 才表示同一个物理路标。
+
+```cpp
+function updateCovisibilityGraph(records):
+    for each record in records where record.state not in {CULLED}:
+        obs_kfs = unique(record.observations.kf_id)
+        weight = record.state in {EXPLICIT, STABLE} ? 1.0 : 0.3  // SmartTrial 低权重
+        weight *= record.quality.confidence
+        for each unordered pair (kf_i, kf_j) in obs_kfs:
+            covisibility[kf_i][kf_j] += weight
+```
+
+`LandmarkQuality.confidence` 综合：
+
+- `total_observations` 与 `track_age_kfs`
+- 深度滤波方差与立体匹配质量
+- `max_parallax_deg`
+- SmartFactor `valid / degenerate / farPoint / outlier / behindCamera` 状态
+- mean reprojection error 与 chi² 历史
+- 显式路标的 `Point3` covariance 对角线
+- 最近 N 帧 local-map projection 的 `found_count / visible_count`
+
+该置信度用于四类门控：
+
+1. Tracking 是否从 `BackendSnapshot.active_landmarks` 投影该点。
+2. Loop PnP 是否把该点作为 3D-2D 候选。
+3. SmartFactor 晋升优先级与 `PROMOTING` 排序。
+4. `REMEDIATING → STABLE/CULLED` 的恢复或剔除决策。
 
 ---
 
@@ -945,7 +1054,7 @@ function optimize(timestamp_kf_nsec, cur_id, max_extra_iterations, extra_delete_
     
     // ===== 阶段 1.5: 入图前位姿预优化 (Pre-iSAM Pose Refinement) =====
     // 目的: 在坏观测进入 iSAM2 之前拦截——iSAM2 的 FEJ 让错误不可逆
-    // 范围: 仅对显式路标 (SmartFactor 试用期路标依赖内部的 3σ 拒绝)
+    // 范围: 仅对显式路标 (SmartFactor 试用期几何依赖内部的 3σ 拒绝)
     // 成本: ~2ms, 4 次 GN 迭代, 6-DOF 变量, 零新依赖 (复用 GenericStereoFactor)
     //
     // ⚠️ 与 ORB-SLAM3 PoseOptimization 的区别:
@@ -997,8 +1106,8 @@ function optimize(timestamp_kf_nsec, cur_id, max_extra_iterations, extra_delete_
     //   - B(k): 窗口内所有 KF IMU 偏置 (受 IMU+bias_walk+Prior 约束)
     //   - L(id): 显式路标 3D 位置 (受 GenericStereoFactor 约束)
     //
-    // 注意: SmartFactor 的隐式路标在 SmartFactor 内部通过 Schur 补消去，
-    //       不进入 iSAM2 状态向量。这是 SmartFactor "试用期"的本质。
+    // 注意: SmartFactor 的隐式几何在 SmartFactor 内部通过 Schur 补消去，
+    //       Point3 不进入 iSAM2 状态向量；LandmarkId/observations 仍由 LandmarkRecord 管理。
     //
     // 与 ORB-SLAM3 的对比:
     //   ORB-SLAM3: 显式调用 Optimizer::LocalBundleAdjustment() 或 LocalInertialBA()
@@ -1346,7 +1455,7 @@ ORB-SLAM3 **不使用 SmartStereo**——它基于 g2o，所有路标都是显�
 | 新增路标的 BA 成本 | O(n³) 随路标数增长 (全局批量) | 近似 O(1) 增量 (在固定窗口+稀疏连接前提下, clique 有界) |
 | 路标总数上限 | 受限于批量 BA 计算时间 (通常 1000-3000) | 受限于 iSAM2 窗口大小 (固定, ~25-30 KFs 内的路标) |
 
-### 5.4b 为什么 Kimera 用隐式路标，而 VINS/ORB-SLAM3 用显式路标？
+### 5.4b 为什么 Kimera 用隐式几何，而 VINS/ORB-SLAM3 用显式路标？
 
 这不是偶然的技术选择——是后端架构决定的必然结果。
 
@@ -1358,7 +1467,7 @@ ORB-SLAM3 **不使用 SmartStereo**——它基于 g2o，所有路标都是显�
 
 3. **双目天然有深度**。单目需要用深度滤波器、逆深度参数化等方式初始化路标深度。双目的 SmartFactor 从第一帧观测就能三角化——不需要额外的初始化系统。
 
-4. **结构无关（structureless）范式的简洁性**。不管理路标变量生命周期、不维护路标地图、不处理路标合并/替换/跨图转移。代码量远小于 ORB-SLAM3 的 MapPoint 系统。
+4. **结构无关（structureless）范式的简洁性**。SmartFactor 不管理 `Point3` 变量生命周期，也不把路标 3D 点加入 iSAM2 状态；但系统仍必须用 `LandmarkRecord` 管理身份、观测、状态、质量、共视和跨线程共享。代码量少于 ORB-SLAM3 的 MapPoint 系统，但不能省掉身份层。
 
 #### VINS-Fusion 选择显式路标的原因
 
@@ -1378,7 +1487,7 @@ ORB-SLAM3 **不使用 SmartStereo**——它基于 g2o，所有路标都是显�
    - **统计信息**：`found_ratio`、`mnVisible`、`mnFound`——决定路标质量的依据。
    - **替换/合并**：`Replace()` 将一个 MapPoint 的观测转移给另一个——Atlas 多地图合并的基础。
 
-3. **Full BA 需要显式路标**。ORB-SLAM3 的 Global Bundle Adjustment 同时优化所有 KF 和所有 MapPoint。SmartFactor 的隐式路标无法参与全局优化。
+3. **Full BA 需要显式路标**。ORB-SLAM3 的 Global Bundle Adjustment 同时优化所有 KF 和所有 MapPoint。SmartFactor 的隐式几何没有 `Point3` 状态变量，无法直接参与全局路标优化。
 
 4. **重定位需要描述子**。跟踪丢失后，ORB-SLAM3 用当前帧的 ORB 描述子匹配 MapPoint 的描述子做 PnP 重定位。SmartFactor 没有描述子。
 
@@ -1395,8 +1504,8 @@ ORB-SLAM3 **不使用 SmartStereo**——它基于 g2o，所有路标都是显�
 
 后端是 GTSAM iSAM2 (Kimera-VIO)
   → 可选 SmartFactor 或显式路标
-  → 选择 SmartFactor：近似常数时间增量、无路标管理负担
-  → 代价：无描述子、无回环集成、无 Full BA
+  → 选择 SmartFactor：近似常数时间增量、无 Point3 状态变量负担
+  → 代价：SmartFactor 自身不提供描述子、共视、生命周期对象、回环集成或 Full BA 语义
 ```
 
 #### Factor-VIO 的混合路线
@@ -1404,7 +1513,7 @@ ORB-SLAM3 **不使用 SmartStereo**——它基于 g2o，所有路标都是显�
 **Kimera 选 SmartFactor 是因为 iSAM2 让它成为可能，不是因为显式路标不好。**
 
 Factor-VIO 的"试用期 SmartFactor → 晋升显式路标"正是要同时获得两者的优势：
-- 日常运营：SmartFactor 的 近似常数时间增量和低管理负担
+- 日常运营：SmartFactor 的 近似常数时间增量和低 `Point3` 状态变量负担
 - 回环/全局 BA/重定位：显式路标的描述子和全局优化能力
 
 这和 OKVIS2 的设计理念一致——OKVIS2 在正常运营时将路标边缘化为位姿图边（类似 SmartFactor），回环时再逆向恢复为显式路标和观测。
@@ -1418,18 +1527,18 @@ ORB-SLAM3: "先信任, 后验证"
   → MapPointCulling 事后剔除不靠谱的
   
 Factor-VIO: "先验证, 后信任"  
-  路标创建 → 试用期 (SmartFactor, 隐式)
-  → 不参与 BA，只约束位姿
-  → 10 条件晋升门控通过后 → 显式 Point3 → 参与 BA
+  LandmarkRecord 创建 → 试用期 (SmartFactor, 隐式几何)
+  → Point3 不进状态，只约束位姿
+  → 10 条件晋升门控通过后 → L(id)+显式 Point3 → 参与 BA
 ```
 
 #### 二、路标生命周期
 
 | 阶段 | ORB-SLAM3 | Factor-VIO |
 |------|----------|-----------|
-| 创建 | KF 间 ORB 匹配 + 三角化 → 立即 `new MapPoint` → `VertexSBAPointXYZ` | 立体匹配成功 → `DEPTH_FILTER` → 深度收敛 → `SMART_TRIAL` |
+| 创建 | KF 间 ORB 匹配 + 三角化 → 立即 `new MapPoint` → `VertexSBAPointXYZ` | 创建 `LandmarkRecord` 身份 → 立体匹配成功 → `DEPTH_FILTER` → 深度收敛 → `SMART_TRIAL` |
 | 初值 | 三角化结果直接作为 g2o 顶点初值 | 深度滤波器收敛值 → SmartFactor 隐式三角化 |
-| 早期优化 | BA 中参与迭代（位姿+路标联合优化） | SmartFactor 内部 Schur 补——路标不进入状态，只约束位姿 |
+| 早期优化 | BA 中参与迭代（位姿+路标联合优化） | SmartFactor 内部 Schur 补——Point3 不进入状态，只约束位姿 |
 | 中期稳定 | 连续观测 → `mnFound/mnVisible` 统计 | 4+ 帧观测 + 10 条件通过 → 晋升为显式 `Point3` |
 | 剔除 | `MapPointCulling()`: found_ratio<0.25 或 2KF 后观测≤3 | chi² 后验连续 3 帧 >7.815 → `CULLED` |
 | 长期 | 参与 Full BA → 全局一致性优化 | iSAM2 边缘化 → `MARGINALIZED` (作为先验保留) |
@@ -1508,13 +1617,13 @@ Factor-VIO: "先验证, 后信任"
 | **`REMEDIATING` 状态** (§1.3 路标状态机) | 显式路标偶发异常 | 允许恢复: 若后续 chi² 连续通过 → 回到 `STABLE`; 若持续异常 → `CULLED` |
 | **SmartFactor 内部异常值拒绝** | `DynamicOutlierRejectionThreshold=3.0` | 3σ 外重投影观测被 SmartFactor 内部拒绝, 不参与隐式三角化 |
 | **`prunePostUpdateOutlierObservations`** | chi² 后验发现异常观测 | 重建 SmartFactor (移除异常观测) 或降级为 CULLED |
-| **退化检测 (SmartFactor)** | `isDegenerate()==true` | ZERO_ON_DEGENERACY 模式: 退化路标的 Jacobian 归零, 不影响位姿优化 |
+| **退化检测 (SmartFactor)** | `isDegenerate()==true` | ZERO_ON_DEGENERACY 模式: 退化几何的 Jacobian 归零, 不影响位姿优化 |
 | **updateSmoother Cheirality 恢复** (§5.6) | 路标三角化到相机后方 | 递归删除该路标全部因子 + 回滚 iSAM2 + 重试 (最多 5 次) |
 
 **两者的关键差异**:
 
 - ORB-SLAM3 的事后补救**发生在 BA 之内** (Huber 核在优化迭代中起作用) 和**BA 之外** (MapPointCulling 事后剔除)。路标始终参与 BA。
-- Factor-VIO 的事后补救**发生在 iSAM2 更新之后** (chi² 检验, REMEDIATING)。试用期路标不参与 BA 但 SmartFactor 内部有统计拒绝。晋升后的显式路标有完整的 chi² 监测+恢复路径。
+- Factor-VIO 的事后补救**发生在 iSAM2 更新之后** (chi² 检验, REMEDIATING)。试用期 `Point3` 不参与 BA，但 `LandmarkRecord` 与 SmartFactor 内部有统计拒绝。晋升后的显式路标有完整的 chi² 监测+恢复路径。
 - ORB-SLAM3 在路标质量差时**降权**（Huber 减小残差权重），Factor-VIO 在路标质量差时**先降级再考察**（REMEDIATING → 恢复或剔除）。
 
 **ORB-SLAM3 显式路标的优势**:
@@ -1531,7 +1640,7 @@ Factor-VIO: "先验证, 后信任"
 
 **Factor-VIO 隐式→显式的优势**:
 1. **试用期保护**——坏路标在 SmartFactor 阶段自然退化, 不污染 BA 状态
-2. **O(1) 增量**——计算量与路标总数无关 (仅受影响 clique)
+2. **近似常数时间增量**——在固定窗口和稀疏连接前提下, 计算量与路标总数弱相关 (仅受影响 clique)
 3. **多级质量门控**——双轮 RANSAC + 深度滤波 + 10 条件晋升 + chi² 后验
 4. **降级不删除**——3D-3D RANSAC 外点保留 2D bearing 约束
 
@@ -1685,9 +1794,13 @@ function detectLoop(query_kf):
 
 ```cpp
 function geometricVerify(query_kf, loop_kf):
-    // 主路径: 3D-2D PnP RANSAC (使用显式路标的3D位置)
-    pts3d = explicit_landmarks.at(loop_kf).get3DPoints()
-    pts2d = query_kf.getObservations(loop_kf.landmark_ids)
+    // 主路径: 3D-2D PnP RANSAC
+    // 只使用 LandmarkRecord 中 EXPLICIT/STABLE、position_world 有效、confidence 足够的路标
+    loop_records = landmark_registry_.recordsObservedBy(loop_kf.id)
+    pnp_records = filter(loop_records,
+        state in {EXPLICIT, STABLE} and position_world and quality.confidence > 0.6)
+    pts3d = [r.position_world for r in pnp_records]
+    pts2d = query_kf.getObservations([r.id for r in pnp_records])
     
     if pts3d.size() >= 15:
         success, T_rel, inliers = solvePnPRansac(
@@ -1696,7 +1809,7 @@ function geometricVerify(query_kf, loop_kf):
             maxIter=300, reprojThreshold=3.0)
         if success:
             // 额外验证: 共视邻居确认(≥3个)
-            covisible = countCovisibleNeighbors(query_kf, loop_kf)
+            covisible = countCovisibleNeighborsByLandmarkId(query_kf, loop_kf)
             if covisible < 3: return REJECTED
             return ACCEPTED, T_rel
     
@@ -1721,13 +1834,15 @@ procedure onLoopAccepted(query_kf, loop_kf, T_rel, covariance):
     // 2. iSAM2更新 → 传播校正到位姿
     smoother->update({loop_factor}, {}, {}, {})
     
-    // 3. 检测受影响的SmartFactor (loop_kf + 1-hop邻居)
-    affected_kfs = {loop_kf.id} ∪ loop_kf.covisible_neighbors
-    for each smart_lmk in old_smart_factors:
+    // 3. 检测受影响 LandmarkRecord (loop_kf + 基于 LandmarkId 的 1-hop 共视邻居)
+    affected_kfs = {loop_kf.id} ∪ covisibility_graph_.neighbors(loop_kf.id, min_weight=3.0)
+    affected_records = landmark_registry_.recordsObservedByAny(affected_kfs)
+    for each record in affected_records where record.state == SMART_TRIAL:
+        smart_lmk = old_smart_factors[record.id]
         if smart_lmk.connected_poses ∩ affected_kfs ≠ ∅:
-            // 4. 用校正后位姿重三角化 → 提升为显式
-            if canPromote(smart_lmk, corrected_estimate):
-                promoteLandmark(smart_lmk)
+            // 4. 用校正后位姿重三角化 → 请求提升为显式
+            if canPromote(record, smart_lmk, corrected_estimate):
+                promoteLandmark(record, smart_lmk, corrected_estimate)
     
     // 5. 再次iSAM2更新 → 纳入提升后的显式因子
     smoother->update(promoted_factors, promoted_values, {}, promoted_delete_slots)
@@ -2100,6 +2215,16 @@ struct LandmarkProbe {
     int n_marginalized = 0;         // MARGINALIZED: 已边缘化
     int n_culled = 0;               // CULLED: 已删除
 
+    // ======== 身份/映射一致性 ========
+    int n_records_total = 0;            // LandmarkRecord 总数
+    int n_track_landmark_mappings = 0;  // TrackId → LandmarkId 映射数
+    int n_orphan_tracks = 0;            // 有 TrackId 但无 LandmarkRecord
+    int n_orphan_smart_factors = 0;     // old_smart_factors_ 中无对应 LandmarkRecord
+    int n_duplicate_landmark_ids = 0;   // registry 中重复 ID (必须为0)
+    int n_active_snapshot_landmarks = 0;// BackendSnapshot.active_landmarks 数
+    double mean_landmark_confidence = 0;
+    double mean_covisibility_weight = 0;
+
     // ======== 深度滤波器 ========
     int df_converged_this_kf = 0;   // 本轮收敛数 (进入 SMART_TRIAL)
     int df_diverged_this_kf = 0;    // 本轮发散数 (→ CULLED)
@@ -2151,6 +2276,47 @@ struct LandmarkProbe {
 |---------|-----------|
 | 每 KF 的路标管线处理后 | `n_*` (状态分布), `df_*`, `promoted_*`, `reject_*`, `chi2_*` |
 | 每 KF 的 SmartFactor 统计 | `sf_*` (遍历 `old_smart_factors_` 中所有 SmartFactor) |
+| 每 KF 的身份一致性检查 | `n_records_total`, `n_track_landmark_mappings`, `n_orphan_*`, `n_active_snapshot_landmarks`, `mean_*` |
+
+#### LandmarkRecord 身份不变量验证
+
+```cpp
+void verifyLandmarkIdentityInvariants(
+    const LandmarkRegistry& registry,
+    const TrackLandmarkMap& track_map,
+    const SmartFactorMap& old_smart_factors,
+    const ExplicitLandmarkMap& explicit_landmarks,
+    const BackendSnapshot& snapshot) {
+
+    // 1. 每个 SmartFactor 必须有对应 LandmarkRecord
+    for (auto& [lmk_id, sf_slot] : old_smart_factors) {
+        CHECK(registry.exists(lmk_id)) << "orphan SmartFactor: " << lmk_id;
+    }
+
+    // 2. 每个显式 L(id) 必须对应唯一、未 CULLED 的 LandmarkRecord
+    for (auto& [lmk_id, explicit_lmk] : explicit_landmarks) {
+        const auto& rec = registry.at(lmk_id);
+        CHECK(rec.state != CULLED);
+        CHECK(rec.point_key.has_value());
+        CHECK_EQ(rec.point_key.value(), L(lmk_id));
+    }
+
+    // 3. TrackId 不能被当作 LandmarkId 使用；映射目标必须存在
+    for (auto& [track_id, lmk_id] : track_map) {
+        CHECK(registry.exists(lmk_id)) << "orphan TrackId: " << track_id;
+        CHECK_NE(static_cast<uint64_t>(track_id), static_cast<uint64_t>(lmk_id))
+            << "TrackId/LandmarkId namespace leak";
+    }
+
+    // 4. Snapshot 只能发布 EXPLICIT/STABLE 且未 CULLED 的路标
+    for (const auto& active : snapshot.active_landmarks) {
+        const auto& rec = registry.at(active.id);
+        CHECK(rec.state == EXPLICIT || rec.state == STABLE);
+        CHECK(rec.state != CULLED);
+        CHECK(rec.point_key.has_value());
+    }
+}
+```
 
 #### SmartFactor 观测验证
 
@@ -2571,7 +2737,10 @@ struct LoopProbe {
     "promote": {"kf": 3, "tot": 156,
                 "rej": {"G7": 5, "G2": 2, "G8": 1}},
     "chi2": {"chk": 80, "ok": 78, "warn": 2, "cull": 0, "mean": 2.1, "max": 12.4},
-    "df": {"conv": 4, "div": 1, "med_d": 3.2}
+    "df": {"conv": 4, "div": 1, "med_d": 3.2},
+    "identity": {"records": 423, "map": 389, "orphan_tracks": 0,
+                 "orphan_sf": 0, "dup_ids": 0, "snap_active": 80,
+                 "conf": 0.74, "covis_w": 5.6}
   },
   "backend": {
     "factors": {"sf_add": 180, "sf_rep": 23, "sf_prom": 3, "imu": 1,
