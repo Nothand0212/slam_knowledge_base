@@ -1,6 +1,6 @@
 # 知识库索引
 
-> 最后更新：2026-05-27
+> 最后更新：2026-06-02
 
 ---
 
@@ -241,6 +241,7 @@
 - [[架构-cpp+ros分离架构]]
 - [[架构-两级优化架构]]
 - [[架构-双ESIKF架构]]
+- [[架构-GTSAM iSAM2 双目VIO后端设计]]
 - [[架构-后端适配器模式]]
 - [[架构-坐标系管理]]
 - [[架构-多传感器松耦合]]
@@ -460,3 +461,4 @@
 - [[phad_fusion设计总结]] - 设计理念 / 三模式切换 / 传感器抽象 / 因子类型 / 初始化策略 / 线程模型 / SOTA 目标
 - [[GTSAM 4.3a1 使用指南]] - 面向 ROS/SLAM 工程的 GTSAM 使用路线
 - [[landmark-pipeline-design]] - 双目 VIO 路标管线设计：深度滤波 → SmartFactor 试用 → 显式晋升 → Chi2 监测 → 边缘化
+- [[factor-vio-implementation-pitfalls]] - Factor-VIO 实现踩坑：GTSAM SmartFactor/iSAM2、OpenVINS、ORB-SLAM3、VINS-Fusion issues 反推 guardrails

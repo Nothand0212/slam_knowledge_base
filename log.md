@@ -4,6 +4,22 @@
 
 ---
 
+## 2026-06-02 research | Factor-VIO 已解决 issue 与官方资料反向加固
+
+- **新增综合踩坑页**：[[factor-vio-implementation-pitfalls]]，汇总 GTSAM SmartFactor/iSAM2、OpenVINS、ORB-SLAM3、VINS-Fusion 的已关闭/已讨论 issue、官方资料和本地源码锚点。
+- **更新设计文档**：[[factor_vio]]、[[stereo-vio-integrated-architecture]]、[[landmark-pipeline-design]]。
+- **新增关键约束**：SmartFactor 不能承载 robust kernel；iSAM2 update 必须批量 preflight；camera-IMU 时间偏移、外参、IMU 单位/噪声必须先体检；无 IMU 样本区间必须安全降级。
+- **新增失败模式**：SmartFactor robust-loss 语义错配、SmartFactor 引用已边缘化 pose、右目失败连坐删除左目 track、时间漂移污染路标、去畸变 NaN/Inf、IMU 单位/外参错误伪装成路标问题。
+- **资料来源**：AnySearch 网络检索、GTSAM/OpenVINS/ORB-SLAM3/VINS-Fusion/Kimera-VIO 本地源码快照与 GitHub issue 线索。
+
+## 2026-06-01 design | Stereo VIO 回环检测与全局一致性设计
+
+- 新增设计笔记：`raw/notes/loop_closure_design.md`（750 行 / 52 小节）
+- 完整设计覆盖：DBoW3+ORB 检测管线、PnP RANSAC 几何验证、BetweenFactor<Pose3> iSAM2 注入、SmartFactor 后处理提升策略、全局 BA 规范、线程安全模型
+- 参考系统源码：ORB-SLAM3 LoopClosing.cc、VINS-Fusion pose_graph.cpp、Kimera-VIO LoopClosureDetector
+- 核心约束：禁止 Identity 协方差、SmartFactor 回环后必须检测并提升、回环检测在独立线程
+- 8 个标准输出：检测伪代码、验证规范、因子注入伪代码、提升策略、GBA 规范、参数表、失败模式、线程安全
+
 ## 2026-06-01 ingest | 双目 VIO 路标管线设计
 
 - 新增综合分析：[[landmark-pipeline-design]]（15 个状态 / 9 个阶段 / 10 个失败模式 / 30+ 参数 / 完整伪代码）
@@ -313,3 +329,14 @@
 - wiki/sources/2026-05-18-harmonyos-arkts-pitfalls.md
 - wiki/entities/方法-TextArea多行文本.md
 - wiki/entities/概念-折叠屏UI布局.md
+
+## 2026-06-01 design | GTSAM iSAM2 双目 VIO 后端设计
+
+新增页面：
+- wiki/entities/架构-GTSAM iSAM2 双目VIO后端设计.md — 基于 Kimera-VIO、DM-VIO、VINS-Fusion、ORB-SLAM3 四个参考系统的完整后端设计文档。
+  涵盖状态向量/因子类型/噪声模型/注入顺序/iSAM2参数/边缘化策略/异常值剔除/SmartFactor→显式Point3迁移/失败模式与恢复/Agents实现提示。
+  研究范围：`raw/codes/Kimera-VIO/src/backend/VioBackend.cpp`、`raw/codes/dm-vio/src/GTSAMIntegration/DelayedMarginalization.cpp`、
+  `raw/codes/VINS-Fusion/vins_estimator/src/factor/marginalization_factor.cpp`、`raw/codes/ORB_SLAM3/src/Optimizer.cc`
+
+更新页面：
+- index.md — 在架构-分类中添加该页索引
