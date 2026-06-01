@@ -1158,7 +1158,7 @@ ORB-SLAM3 **不使用 SmartStereo**——它基于 g2o，所有路标都是显�
 | 路标初始值 | 关键帧间 ORB 匹配+三角化 | 深度滤波器 (SVO Pro) → SmartFactor 隐式三角化 → 晋升时显式 |
 | 路标剔除 | `MapPointCulling`: found_ratio<0.25 或 2KF 后观测≤3 | chi² 后验 + SmartFactor 内部拒绝 + 连续 3 帧异常值 |
 | BA 中的路标角色 | **参与优化**——和位姿一起被 g2o LM 迭代 | 试用期: **不参与** (Schur 补消去); 晋升后: **参与** (iSAM2 状态变量) |
-| 新增路标的 BA 成本 | O(n³) 随路标数增长 (全局批量) | O(1) 增量 (仅受影响 clique) |
+| 新增路标的 BA 成本 | O(n³) 随路标数增长 (全局批量) | 近似 O(1) 增量 (在固定窗口+稀疏连接前提下, clique 有界) |
 | 路标总数上限 | 受限于批量 BA 计算时间 (通常 1000-3000) | 受限于 iSAM2 窗口大小 (固定, ~25-30 KFs 内的路标) |
 
 ### 5.4b 为什么 Kimera 用隐式路标，而 VINS/ORB-SLAM3 用显式路标？
@@ -1169,7 +1169,7 @@ ORB-SLAM3 **不使用 SmartStereo**——它基于 g2o，所有路标都是显�
 
 1. **GTSAM 血缘**。SmartFactor 是 MIT Luca Carlone 组贡献给 GTSAM 的核心创新（Carlone et al., ICRA 2014）。Kimera-VIO 由同组开发——用自己的因子是自然的。
 
-2. **iSAM2 增量性能的关键保障**。SmartFactor 通过 Schur 补将路标从状态中消去——Bayes Tree 的规模只取决于位姿数，与路标数无关。这是 iSAM2 实现 O(1) 增量更新的前提。
+2. **iSAM2 增量性能的关键保障**。SmartFactor 通过 Schur 补将路标从状态中消去——Bayes Tree 的规模只取决于位姿数，与路标数无关。这是 iSAM2 实现 近似常数时间增量更新的前提。
 
 3. **双目天然有深度**。单目需要用深度滤波器、逆深度参数化等方式初始化路标深度。双目的 SmartFactor 从第一帧观测就能三角化——不需要额外的初始化系统。
 
@@ -1210,7 +1210,7 @@ ORB-SLAM3 **不使用 SmartStereo**——它基于 g2o，所有路标都是显�
 
 后端是 GTSAM iSAM2 (Kimera-VIO)
   → 可选 SmartFactor 或显式路标
-  → 选择 SmartFactor：O(1) 增量、无路标管理负担
+  → 选择 SmartFactor：近似常数时间增量、无路标管理负担
   → 代价：无描述子、无回环集成、无 Full BA
 ```
 
@@ -1219,7 +1219,7 @@ ORB-SLAM3 **不使用 SmartStereo**——它基于 g2o，所有路标都是显�
 **Kimera 选 SmartFactor 是因为 iSAM2 让它成为可能，不是因为显式路标不好。**
 
 Factor-VIO 的"试用期 SmartFactor → 晋升显式路标"正是要同时获得两者的优势：
-- 日常运营：SmartFactor 的 O(1) 增量和低管理负担
+- 日常运营：SmartFactor 的 近似常数时间增量和低管理负担
 - 回环/全局 BA/重定位：显式路标的描述子和全局优化能力
 
 这和 OKVIS2 的设计理念一致——OKVIS2 在正常运营时将路标边缘化为位姿图边（类似 SmartFactor），回环时再逆向恢复为显式路标和观测。
@@ -1364,7 +1364,7 @@ Factor-VIO: "先验证, 后信任"
 | 弱纹理 (MH_01-MH_05) | ORB-SLAM3 的显式路标更可靠 (KLT 在弱纹理下退化严重) |
 | 动态环境 | Factor-VIO 的多级过滤更有优势 |
 | 长距离/大场景 | ORB-SLAM3 (Full BA + Atlas 多地图) vs Factor-VIO (仅窗口内, 需回环) |
-| 嵌入端/低算力 | Factor-VIO (O(1) 增量) |
+| 嵌入端/低算力 | Factor-VIO (近似常数时间增量) |
 | 需要稠密路标 | ORB-SLAM3 (显式路标可直接用于重定位) |
 
 | ORB-SLAM3 | g2o 调用 | 优化变量 | Factor-VIO 等价物 |
@@ -1378,11 +1378,11 @@ Factor-VIO: "先验证, 后信任"
 
 **iSAM2 比 g2o 批量 BA 的关键优势**：
 
-1. **选择性重线性化**：不是每帧对整个窗口重新 LM 迭代——只重新线性化 Bayes Tree 中受新因子影响的 clique。这使增量平滑的时间接近 O(1) 而非 O(n³)。
+1. **选择性重线性化**：不是每帧对整个窗口重新 LM 迭代——只重新线性化 Bayes Tree 中受新因子影响的 clique。这使增量平滑的时间接近常数时间而非 O(n³)。
 
 2. **自动边缘化**：`IncrementalFixedLagSmoother` 按时间戳自动边缘化旧变量。ORB-SLAM3 需要手动管理滑动窗口。
 
-3. **可逆边缘化**：iSAM2 的 Bayes Tree 支持"反边缘化"——旧变量可以在需要时恢复。这对回环后重新优化受影响路标非常重要。
+3. **因子移除与重线性化**：iSAM2 支持通过 `delete_slots` 移除因子，受影响 clique 可被重线性化。但**已边缘化的旧变量信息变为线性化先验（LinearContainerFactor），通常不可无损恢复**。若需要回环后重建旧观测，应借鉴 OKVIS2 的 pose-graph edge revival 或 Basalt 的 non-linear factor recovery 机制。
 
 **iSAM2 的局限**：
 
@@ -1567,11 +1567,11 @@ T_b_cam: camera→body (外参, body_P_sensor)
 
 ### 7.2 GTSAM因子中的坐标语义
 
-| 因子 | body_P_sensor含义 | 验证 |
-|------|------------------|------|
+| 因子 | body_P_sensor 含义 | 验证 |
+|------|-------------------|------|
 | `SmartStereoProjectionPoseFactor` | **T_body_camera** (相机在IMU系) | EuRoC: `(0.05, 0, 0)` |
-| `GenericStereoFactor<Pose3,Point3>` | 内嵌在Cal3_S2Stereo中 | 同上 |
-| `CombinedImuFactor` | 使用body_P_sensor=T_body_camera旋转acc/gyr到相机系 | 同上 |
+| `GenericStereoFactor<Pose3,Point3>` | 内嵌在 Cal3_S2Stereo 基线中 | 同上 |
+| `ImuFactor` / `CombinedImuFactor` | IMU 外参通常为 identity (body=IMU); 预积分测量已在 IMU frame | **不要**混用 camera extrinsic |
 
 **⚠️ 陷阱**: 如果传入T_camera_body (反了), 相机位置差一个符号, 所有三角化点跑到相机后方。
 
@@ -2460,10 +2460,24 @@ void processKeyframe(const LocalGraphKeyframeInput& in) {
         lp.resetHistograms();
     }
 }
+```
 
 ---
 
-## 十、相关页面
+## 十、外部参考文献
+
+1. Dellaert & Kaess, *Factor Graphs for Robot Perception*, 2017 — https://www.cs.cmu.edu/~kaess/pub/Dellaert17fnt.pdf
+2. Kaess et al., *iSAM2: Incremental Smoothing and Mapping Using the Bayes Tree*, IJRR 2012
+3. Forster et al., *On-Manifold Preintegration for Real-Time Visual-Inertial Odometry*, TRO 2017
+4. GTSAM Official Documentation — https://borglab.github.io/gtsam/
+5. Rosinol et al., *Kimera: an Open-Source Library for Real-Time Metric-Semantic Localization and Mapping*, ICRA 2020 — https://arxiv.org/abs/1910.02490
+6. Qin et al., *VINS-Mono: A Robust and Versatile Monocular Visual-Inertial State Estimator*, TRO 2018 — https://arxiv.org/abs/1708.03852
+7. Campos et al., *ORB-SLAM3: An Accurate Open-Source Library for Visual, Visual-Inertial and Multi-Map SLAM*, TRO 2021 — https://arxiv.org/abs/2007.11898
+8. von Stumberg & Cremers, *DM-VIO: Delayed Marginalization Visual-Inertial Odometry*, RA-L 2022 — https://arxiv.org/abs/2201.04114
+9. Geneva et al., *OpenVINS: A Research Platform for Visual-Inertial Estimation*, ICRA 2020
+10. Leutenegger et al., *OKVIS2: Realtime Scalable Visual-Inertial SLAM with Loop Closure*, 2022 — https://arxiv.org/abs/2202.09199
+
+## 十一、相关页面
 
 - [[stereo-vio-integrated-architecture]]
 - [[设计-立体VIO前端管线]]
