@@ -1041,6 +1041,56 @@ Factor-VIO 的 BA (隐式 iSAM2 增量):
 
 **BA 层级对照**：
 
+| ORB-SLAM3 | g2o 调用 | 优化变量 | Factor-VIO 等价物 | 缺失风险 |
+|-----------|---------|---------|------------------|---------|
+| Motion-only BA | `Optimizer::PoseOptimization` | 仅当前帧位姿, 固定 MapPoint | `isam2.update()` 加新因子——新位姿自然被单独优化 (旧 clique 未受影响) | 无 |
+| Local BA | `Optimizer::LocalBundleAdjustment` | 当前 KF + 共视 KF + 路标 | `isam2.update()` 加新 SmartFactor——共视 KF 所在的 clique 被重线性化 | 无 |
+| Local Inertial BA | `Optimizer::LocalInertialBA` | Local BA + 速度/偏置/重力 | `isam2.update()` 加新 IMU 因子 + SmartFactor——IMU 连接的变量所在 clique 被触发 | 无 |
+| **Essential Graph** | `Optimizer::OptimizeEssentialGraph` | 仅 KF 位姿 (不含路标) | `isam2.update()` 加 BetweenFactor——Bayes Tree 增量传播回环校正 | ⚠️ 回环后**不**显式优化路标 |
+| **Full BA** | `Optimizer::GlobalBundleAdjustment` | 所有 KF + 所有 MapPoint | ❌ **无增量等价物**——需从零构建因子图 + `LevenbergMarquardtOptimizer` | 🔴 |
+| **Full Inertial BA** | `Optimizer::FullInertialBA` | Full BA + 速度/偏置/重力/尺度 | ❌ 同上 | 🔴 |
+
+### 5.4a iSAM2 增量 vs g2o 多层 BA 的根本差异
+
+ORB-SLAM3 在 **三个不同层次** 显式调用优化器：
+
+```
+Tracking 线程:    Motion-only BA (固定路标, 仅优化当前帧6-DOF)
+                  └→ g2o, 4次 Gauss-Newton 迭代, ~3ms
+                  
+LocalMapping 线程: Local BA / LocalInertial BA (窗口KF+路标联合优化)
+                  └→ g2o, 10次 LM 迭代, ~50-100ms
+                  
+LoopClosing 线程: Essential Graph (仅位姿) → Full BA (全变量)
+                  └→ g2o, 20/100次 LM 迭代, 后台线程
+```
+
+Factor-VIO 只有 **一个 iSAM2**，所有优化通过增量 `isam2.update()` 隐式完成。这不是缺陷——是范式差异：
+
+| 维度 | ORB-SLAM3 多层 BA | Factor-VIO 单 iSAM2 |
+|------|------------------|-------------------|
+| Motion-only BA | **显式**调用, 固定路标只优化位姿 | **隐式**——新 KF 进入 Bayes Tree 时，旧 clique 不受影响，新位姿被自然优化 |
+| Local BA | **显式**批量 LM 迭代窗口内所有变量 | **隐式**——`isam2.update()` 的重线性化等价于对受影响 clique 做 BA |
+| 回环后 Essential Graph | **显式**优化所有 KF 位姿 (不含路标) | **隐式**——BetweenFactor 注入后 Bayes Tree 增量传播校正 |
+| 回环后路标优化 | **显式** Full BA 重新优化所有 MapPoint | **缺失**——iSAM2 做 incremental update 但不会像 Full BA 那样从头重建所有路标位置 |
+| 边缘化 | 手动管理滑动窗口 + 先验 | iSAM2 自动按时间戳边缘化 |
+
+**iSAM2 缺失 Full BA 的后果**：
+
+1. **回环后路标不全局更新**：ORB-SLAM3 回环后做 Full BA，所有 MapPoint 的 3D 位置从头重优化。iSAM2 做增量更新——只有受回环因子影响的 clique 被重线性化，边缘化的旧路标**不会被重新优化**。
+
+2. **边缘化先验不可逆**：被边缘化的旧 KF 变成 LinearContainerFactor（先验），其线性化点被 FEJ 固定。如果后续回环发现这些 KF 的位置有误，**先验无法修正**——错误被永久锁定在图中。
+
+3. **长期误差累积**：连续边缘化使误差逐步固化，没有周期性的 Full BA 来全局矫正。这是 iSAM2 的固有问题——DM-VIO 的**延迟边缘化**正是为此设计。
+
+**Factor-VIO 的缓解策略**：
+
+1. **回环后触发 Global BA**：在回环累计 ≥3 次或漂移 >0.5m 时，从零构建因子图 + `LevenbergMarquardtOptimizer` 做批量优化。结果作为 iSAM2 的新初值（warm-start）。
+
+2. **显式路标参与全局优化**：晋升后的显式 `Point3` 变量在 Global BA 中被重新优化，弥补 iSAM2 增量模式无法全局修正路标位置的短板。
+
+3. **紧首帧先验 + 强 IMU 约束**：减少漂移累积，降低回环时的校正量，使得 iSAM2 增量传播足够覆盖校正范围。
+
 ### 5.4a ORB-SLAM3 的因子体系 (g2o 边) 与 Factor-VIO (GTSAM 因子) 对照
 
 ORB-SLAM3 **不使用 SmartStereo**——它基于 g2o，所有路标都是显式的 `VertexSBAPointXYZ`。
