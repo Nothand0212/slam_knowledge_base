@@ -150,13 +150,21 @@ INITIALIZED:
 ```
 processFrame(stereo_image, imu_buffer, prev_state):
 
-  PHASE 0: 时间戳与IMU窗口
+  PHASE 0a: 消费 Backend 反馈 (异步, 无锁)
+    snap = atomic_load(backend_snapshot_ptr_)
+    if snap and snap->snapshot_id > last_consumed_snap_id:
+        consumeBackendSnapshot(snap)  // 更新 pose_seed, bias, active_lmks, culled
+        last_consumed_snap_id = snap->snapshot_id
+
+  PHASE 0b: 时间戳与IMU窗口
     t_cur = stereo_image.timestamp
     imu_window = selectImuBetween(imu_buffer, prev_state.timestamp, t_cur)
     delta_t_segments = extractTimeSegments(imu_window)  // 真实时间戳差,非常数dt
 
   PHASE 1: IMU预积分
-    pim = new PreintegratedCombinedMeasurements(params, prev_state.bias)
+    // 用后端最新 bias (而非前端自维护的旧 bias — 如果有 snapshot 反馈)
+    auto imu_bias = frontend_imu_bias_;  // 已由 consumeBackendSnapshot 更新
+    pim = new PreintegratedCombinedMeasurements(params, imu_bias)
     for each (dt, acc, gyr) in imu_window:
         pim.integrateMeasurement(acc, gyr, dt)
 
@@ -213,14 +221,17 @@ processFrame(stereo_image, imu_buffer, prev_state):
     tracks_alive = compactByStatus(tracks_active, status)
 
   PHASE 6b: [可选] Tracking 级位姿精化 (对标 ORB-SLAM3 PoseOptimization)
-    // 对当前帧显式路标做 motion-only BA → refined pose + inlier count
+    // 用 BackendSnapshot 中的 active_landmarks 做 3D-2D 投影匹配
     // 不同于后端 §5.3 阶段 1.5 的 pre-iSAM refinement
     // 用途: 提升关键帧决策质量 (inlier count) + 实时位姿输出精度
-    if config.tracking_pose_refinement and explicit_landmarks_visible >= 10:
-        graph_mo, values_mo = buildMotionOnlyGraph(imu_pose, explicit_obs)
-        refined = GaussNewtonOptimizer(graph_mo, values_mo, {maxIter=4}).optimize()
-        current_pose = refined.at<Pose3>(X(cur_id))
-        tracking_quality_inliers = countReprojInliers(refined, explicit_obs)
+    if config.tracking_pose_refinement and active_landmarks_cache_.size() >= 10:
+        // 用 IMU 预测位姿作为初值, 投影 active_landmarks 到当前帧
+        visible_lmks = projectActiveLandmarks(imu_predicted_pose, active_landmarks_cache_)
+        if visible_lmks.size() >= 10:
+            graph_mo, values_mo = buildMotionOnlyGraph(imu_predicted_pose, visible_lmks)
+            refined = GaussNewtonOptimizer(graph_mo, values_mo, {maxIter=4}).optimize()
+            current_pose = refined.at<Pose3>(X(cur_id))
+            tracking_quality_inliers = countReprojInliers(refined, visible_lmks)
     else:
         current_pose = imu_predicted_pose
         tracking_quality_inliers = r2d2d_inliers
@@ -253,7 +264,130 @@ processFrame(stereo_image, imu_buffer, prev_state):
 
 **RANSAC 执行时机**：Kimera-VIO 中 RANSAC 仅发生在关键帧内部（`processStereoFrame` L342+ 块）。Factor-VIO 设计选择在每帧执行 2D-2D RANSAC，关键帧额外执行 3D-3D RANSAC。这是有意偏离 Kimera 的架构选择——目的是在非关键帧上也剔除明显的 2D 外点。
 
-### 2.2 NCC立体匹配详细规格
+### 2.2 前后端数据闭环
+
+> 对标 ORB-SLAM3 的 Tracking↔LocalMapping 反馈机制。Factor-VIO 的 Tracking 当前不消费 Backend 数据——会导致两套逐渐分裂的位姿/路标状态。
+
+#### 2.2.1 BackendSnapshot 数据结构
+
+```cpp
+struct BackendSnapshot {
+    // === 版本控制 ===
+    uint64_t snapshot_id;             // 单调递增, 用于检测过期
+    KfId latest_kf_id;                // 发布时最新的关键帧 ID
+    Timestamp publish_timestamp_ns;
+
+    // === 优化后的位姿与速度 ===
+    gtsam::NavState optimized_navstate; // 最新 KF 的位姿 + 速度
+    gtsam::imuBias::ConstantBias optimized_bias; // 最新 IMU 偏置
+
+    // === 活跃局部地图 ===
+    // 仅包含 STABLE 状态的显式路标 (不含 SmartFactor 试用期)
+    struct ActiveLandmark {
+        gtsam::Point3 position_world;     // 世界系 3D 坐标
+        gtsam::Vector3 position_sigma;    // 位置不确定性 (iSAM2 边际协方差对角)
+        int total_observations;           // 总观测数
+        LandmarkId id;
+        bool is_outlier_suspect;          // chi² suspect 标记
+    };
+    std::vector<ActiveLandmark> active_landmarks;
+
+    // === 活跃局部关键帧 ===
+    struct ActiveKeyframe {
+        KfId kf_id;
+        gtsam::Pose3 pose_world;          // 优化后的位姿
+    };
+    std::vector<ActiveKeyframe> active_keyframes;  // 时间窗口内的 KF (≤30)
+
+    // === Backend 确认的异常值 ===
+    // 连续 3 帧 chi² 异常已被 CULLED 的路标 ID 列表
+    std::vector<LandmarkId> culled_landmarks;
+
+    // === 有效性检查 ===
+    bool is_valid() const { return snapshot_id > 0; }
+};
+```
+
+#### 2.2.2 发布-消费协议
+
+```
+Backend 线程:
+  isam2.update() 成功
+    → 从 state_ 提取最新 X(kf), V(kf), B(kf)
+    → 遍历 explicit_landmarks (仅 STABLE 状态)
+    → 构建 BackendSnapshot
+    → snapshot_id++
+    → 原子写入 shared_ptr<const BackendSnapshot> (写端)
+
+Tracking 线程:
+  每帧开始:
+    auto snap = atomic_load(backend_snapshot_ptr_);  // 无锁读取
+    if snap and snap->snapshot_id > last_consumed_id:
+        last_consumed_id = snap->snapshot_id;
+        consumeBackendSnapshot(snap);
+    // 继续正常的 KLT+RANSAC 流程
+```
+
+#### 2.2.3 Tracking 如何使用 Backend 数据
+
+```cpp
+void consumeBackendSnapshot(const BackendSnapshot& snap) {
+    // 1. 位姿种子: 后端优化位姿 + 帧间 IMU 预积分 → 更准的当前帧初值
+    latest_optimized_pose_ = snap.optimized_navstate.pose();
+    latest_optimized_vel_  = snap.optimized_navstate.velocity();
+
+    // 2. IMU bias: 覆写前端预积分器, 下一帧传播更准
+    frontend_imu_bias_ = snap.optimized_bias;
+    pim_->resetIntegrationAndSetBias(snap.optimized_bias);
+
+    // 3. 活跃路标: 用于当前帧的 3D-2D 投影匹配 (对标 ORB-SLAM3 TrackLocalMap)
+    active_landmarks_cache_ = snap.active_landmarks;
+    // 在 processFrame 的 RANSAC 之后:
+    //   for each lmk in active_landmarks_cache_:
+    //       投影到当前帧 (使用 IMU 预测的 T_w_c)
+    //       if 在视野内 and 重投影误差 < 阈值:
+    //           建立 3D-2D 匹配 → 增加当前帧的路标观测
+
+    // 4. CULLED 路标: 清理前端持有的已淘汰路标引用
+    for (auto id : snap.culled_landmarks) {
+        frontend_track_map_.erase(id);  // 不再跟踪该 track
+    }
+}
+```
+
+#### 2.2.4 多线程一致性保证
+
+```
+1. 发布端 (Backend): 单写者, 无锁
+   - Backend::publishSnapshot() 在 isam2.update() 后调用
+   - 构建新 snapshot, 原子替换 shared_ptr
+
+2. 消费端 (Tracking): 单读者, 无锁
+   - atomic_load(shared_ptr) 获取只读引用
+   - 在单帧内使用完毕, 不跨帧持有
+
+3. Stale snapshot fallback:
+   - 如果 snapshot_id 未变化 (Backend 尚未完成新一轮优化)
+     → 继续使用上一版本的 snapshot
+   - 如果 snapshot_id 跳跃 >1 (Backend 连续完成多轮而 Tracking 未读取)
+     → 只消费最新版本, 跳过中间的
+
+4. Track/Landmark ID 稳定性:
+   - LandmarkId 在 Backend 中不可变 (SmartFactor 晋升时分配, 终身不变)
+   - Tracking 中的 track_id 不应与 Backend 的 LandmarkId 混用
+   - 映射: track_id → LandmarkId 由前端维护, 晋升时建立
+```
+
+#### 2.2.5 与 ORB-SLAM3 对照
+
+| 数据流 | ORB-SLAM3 | Factor-VIO |
+|--------|----------|-----------|
+| 位姿反馈 | `mVelocity` 更新 + `mpReferenceKF` | `optimized_navstate` → 前端位姿种子 |
+| 路标反馈 | `TrackLocalMap()` 投影局部 MapPoint | `active_landmarks` → 3D-2D 投影匹配 |
+| 路标剔除 | `MapPointCulling` → `SetBadFlag` → Tracking 不再使用 | `culled_landmarks` → 前端清理 track |
+| IMU bias | `mCurrentFrame.mImuBias` 从上一关键帧获取 | `optimized_bias` → 前端预积分器 |
+| 线程安全 | Map/KeyFrame/MapPoint 各自有 mutex | `shared_ptr<const Snapshot>` 无锁读写 |
+| 延迟容忍 | 同步 (LocalMapping 暂停时 Tracking 等待) | 异步 (Tracking 不等待 Backend, 用上次 Snapshot) |
 
 ```
 function nccStereoMatch(left_img, right_img, left_pt, baseline, K):
