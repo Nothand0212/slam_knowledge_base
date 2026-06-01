@@ -1364,6 +1364,8 @@ initialEstimate.clear();                // ← 每次更新后清空!
 
 4. **SmartFactor 单例复用 vs clone-and-add**: GTSAM 示例中同一个 SmartFactor 对象跨多次 `isam.update()` 复用，直接 `smartFactor->add(meas, key)` 追加观测（ISAM2Example_SmartFactor:L83）。Kimera-VIO 和 Factor-VIO 用 clone-and-add 避免直接修改已线性化的因子——两者均可，clone-and-add 更安全。
 
+5. **GTSAM 官方立体 VO 示例用显式路标而非 SmartFactor**: `StereoVOExample.cpp` 直接使用 `GenericStereoFactor<Pose3, Point3>` + 显式 `Point3` 变量（L50-67），不用 SmartFactor。这验证了 Factor-VIO 的核心设计决策——显式路标是 GTSAM 的推荐模式，SmartFactor 是服务于"试用期"的优化手段。
+
 ### 5.6 updateSmoother异常恢复 (Kimera-VIO模式)
 
 ```
