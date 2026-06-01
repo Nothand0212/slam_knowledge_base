@@ -546,7 +546,7 @@ function postUpdateOutlierCheck(isam2_result, explicit_landmarks):
 | smart_factor_pixel_sigma | 3.0 px | Kimera `smartNoiseSigma_` |
 | explicit_pixel_sigma | 1.5 px | 晋升后收紧 |
 | outlier_rejection_sigma | 3.0 | Kimera `outlierRejection_` |
-| landmark_distance_threshold | 20.0 m | Kimera |
+| landmark_distance_threshold | 20.0 m (Euroc YAML: 10.0) | Kimera header默认(20.0), Euroc覆盖为10.0 |
 | retriangulation_threshold | 1e-3 | Kimera |
 | max_feature_track_age | 25 KFs | Kimera |
 
@@ -628,10 +628,10 @@ void anchorInitialState(LocalStateEstimate init):
     
     NonlinearFactorGraph g;
     
-    // 姿态先验: roll/pitch由重力可观=紧, yaw不可观=适中, 位置=极紧(Kimera级别)
+    // 姿态先验: roll/pitch由重力可观=紧(但Kimera用0.1745rad初始), yaw不可观=适中, 位置=极紧
     auto pose_noise = noiseModel::Diagonal::Sigmas(
-        (Vector(6) << 1e-5, 1e-5, 1.75e-3, 1e-5, 1e-5, 1e-5).finished());
-    //                    roll  pitch  yaw      x     y     z
+        (Vector(6) << 0.1745, 0.1745, 1.75e-3, 1e-5, 1e-5, 1e-5).finished());
+    //                    roll    pitch    yaw      x     y     z
     g.addPrior(X(0), init.T_w_b, pose_noise);
     
     auto vel_noise = noiseModel::Isotropic::Sigma(3, 1e-3);
@@ -1123,7 +1123,7 @@ Factor-VIO 只有 **一个 iSAM2**，所有优化通过增量 `isam2.update()` �
 
 3. **紧首帧先验 + 强 IMU 约束**：减少漂移累积，降低回环时的校正量，使得 iSAM2 增量传播足够覆盖校正范围。
 
-### 5.4a ORB-SLAM3 的因子体系 (g2o 边) 与 Factor-VIO (GTSAM 因子) 对照
+### 5.4c ORB-SLAM3 的因子体系 (g2o 边) 与 Factor-VIO (GTSAM 因子) 对照
 
 ORB-SLAM3 **不使用 SmartStereo**——它基于 g2o，所有路标都是显式的 `VertexSBAPointXYZ`。
 
@@ -1660,7 +1660,7 @@ GTSAM MakeSharedD = NED (不兼容, 会导致优化发散)
 
 ---
 
-## 十、探针系统设计
+## 九、探针系统设计
 
 > 参考 Kimera-VIO `DebugVioInfo` (`VioBackend-definitions.h:L111-225`) + `DebugTrackerInfo` (`Tracker-definitions.h:L78-190`) + ORB-SLAM3 `REGISTER_TIMES` 的设计模式。
 > 每个模块独立维护探针结构体，支持三级详细度 (SILENT/STATS/VERBOSE)，关键异常自动触发全量 dump。
@@ -1843,7 +1843,7 @@ bool failureDetection(Vector3d acc_bias, Vector3d gyr_bias) {
 
 ---
 
-## 十一、相关页面
+## 十、相关页面
 
 - [[stereo-vio-integrated-architecture]]
 - [[设计-立体VIO前端管线]]
