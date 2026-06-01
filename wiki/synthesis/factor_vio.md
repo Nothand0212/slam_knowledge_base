@@ -722,7 +722,28 @@ function optimize(timestamp_kf_nsec, cur_id, max_extra_iterations, extra_delete_
     //   时间戳 < max_timestamp - smootherLag → 被边缘化
     //   即: cur_id - key_timestamp > lag_states → 老变量被边缘化
     
-    // ===== 阶段 2: iSAM2 增量更新 =====
+    // ===== 阶段 2: iSAM2 增量 BA 优化 =====
+    // ⚠️ isam2.update() 本身就是 Bundle Adjustment!
+    // 它在 Bayes Tree 中做增量非线性优化:
+    //   1. 将 new_factors 在当前线性化点线性化 → 高斯因子
+    //   2. 对受影响的 clique 做消元 (elimination) → 更新 Bayes Tree
+    //   3. 对受影响变量做回代 (back-substitution) → 更新估计值
+    //   4. 检查是否需要重线性化 (relinearizeThreshold)
+    //
+    // 被优化的变量:
+    //   - X(k): 窗口内所有 KF 位姿 (受 SmartFactor+IMU+Prior 约束)
+    //   - V(k): 窗口内所有 KF 速度 (受 IMU+Prior 约束)
+    //   - B(k): 窗口内所有 KF IMU 偏置 (受 IMU+bias_walk+Prior 约束)
+    //   - L(id): 显式路标 3D 位置 (受 GenericStereoFactor 约束)
+    //
+    // 注意: SmartFactor 的隐式路标在 SmartFactor 内部通过 Schur 补消去，
+    //       不进入 iSAM2 状态向量。这是 SmartFactor "试用期"的本质。
+    //
+    // 与 ORB-SLAM3 的对比:
+    //   ORB-SLAM3: 显式调用 Optimizer::LocalBundleAdjustment() 或 LocalInertialBA()
+    //              → g2o LM 优化器, 批量迭代, 优化窗口内 KF+MapPoint
+    //   Factor-VIO: isam2.update() 自动完成等价的增量平滑
+    //              → 只重线性化受影响变量, 不需要显式调用 "BA 函数"
     result = updateSmoother(&result, new_factors_tmp, new_values_,
                             key_frame_count, delete_slots)
     // updateSmoother 内部:
@@ -952,7 +973,53 @@ Vwb2 = Vwb1 + dt*Gravity + Rwb1*pim_frame->GetDeltaVelocity(bias_lastFrame);
 | `LOST` | 重定位 (全量ORB + DBoW3 + PnP) 或 重新初始化 |
 | Atlas 多地图 | 单地图模式(简化); 或 RF2-Atlas 模式 |
 
-### 5.4 iSAM2参数配置
+### 5.4 BA 优化的本质：iSAM2 增量平滑 vs g2o 批量 BA
+
+**Factor-VIO 中没有显式的"BA 函数调用"——`isam2.update()` 本身就是 BA。**
+
+```
+ORB-SLAM3 的 BA (显式 g2o 调用):
+  Optimizer::LocalBundleAdjustment(kf, map)        ← 批量 LM 迭代
+  Optimizer::LocalInertialBA(kf, map, ...)          ← 批量 LM 迭代 (含 IMU)
+  优化变量: 窗口内 KF 位姿 + 路标 3D 位置 (+ 速度/偏置/重力)
+  
+Factor-VIO 的 BA (隐式 iSAM2 增量):
+  isam2.update(new_factors, new_values, timestamps, delete_slots)
+  内部流程:
+    ① 新因子在当前线性化点线性化 → 高斯因子
+    ② 对受影响 clique 消元 (elimination) → 更新 Bayes Tree
+    ③ 回代 (back-substitution) → 更新估计值
+    ④ 检查是否需要重线性化 (relinearizeThreshold=0.01)
+  
+  ⚠️ "增量"不是"只优化新变量"——受影响 clique 中的旧变量也被重线性化+重优化
+```
+
+**BA 层级对照**：
+
+| ORB-SLAM3 | g2o 调用 | 优化变量 | Factor-VIO 等价物 |
+|-----------|---------|---------|------------------|
+| Motion-only BA | `Optimizer::PoseOptimization` | 仅当前帧位姿, 固定 MapPoint | `isam2.update()` 加新因子——新位姿自然被单独优化 (旧 clique 未受影响) |
+| Local BA | `Optimizer::LocalBundleAdjustment` | 当前 KF + 共视 KF + 路标 | `isam2.update()` 加新 SmartFactor——共视 KF 所在的 clique 被重线性化 |
+| Local Inertial BA | `Optimizer::LocalInertialBA` | Local BA + 速度/偏置/重力 | `isam2.update()` 加新 IMU 因子 + SmartFactor——IMU 连接的变量所在 clique 被触发 |
+| Full BA | `Optimizer::GlobalBundleAdjustment` | 所有 KF + 所有 MapPoint | 非增量: 从零构建因子图 + `LevenbergMarquardtOptimizer` |
+| Full Inertial BA | `Optimizer::FullInertialBA` | Full BA + 速度/偏置/重力/尺度 | 非增量: 同上, 含 IMU 变量 |
+| PGO (回环后) | `Optimizer::OptimizeEssentialGraph` | 仅 KF 位姿 (不含路标) | `isam2.update()` 加 BetweenFactor——Bayes Tree 增量传播回环校正 |
+
+**iSAM2 比 g2o 批量 BA 的关键优势**：
+
+1. **选择性重线性化**：不是每帧对整个窗口重新 LM 迭代——只重新线性化 Bayes Tree 中受新因子影响的 clique。这使增量平滑的时间接近 O(1) 而非 O(n³)。
+
+2. **自动边缘化**：`IncrementalFixedLagSmoother` 按时间戳自动边缘化旧变量。ORB-SLAM3 需要手动管理滑动窗口。
+
+3. **可逆边缘化**：iSAM2 的 Bayes Tree 支持"反边缘化"——旧变量可以在需要时恢复。这对回环后重新优化受影响路标非常重要。
+
+**iSAM2 的局限**：
+
+1. **FEJ (First-Estimates Jacobian)**：边缘化先验的线性化点一旦固定就不能变。如果边缘化时 scale/gravity/bias 尚未收敛, 错误会固化。参见 [[概念-Schur补与边缘化]] 和 DM-VIO 的延迟边缘化。
+
+2. **需要好的初值**：增量平滑对初值敏感——差的初值导致线性化点偏, 后续增量修正幅度有限。ORB-SLAM3 的批量 BA 在初值差时可以通过多次 LM 迭代修正。
+
+### 5.5 iSAM2参数配置
 
 ```cpp
 gtsam::ISAM2Params isam_param;
@@ -969,7 +1036,7 @@ auto smoother = IncrementalFixedLagSmoother(
     isam_param);
 ```
 
-### 5.5 updateSmoother异常恢复 (Kimera-VIO模式)
+### 5.6 updateSmoother异常恢复 (Kimera-VIO模式)
 
 ```
 procedure updateSmoother(new_factors, new_values, timestamps, delete_slots):
@@ -1001,7 +1068,7 @@ procedure updateSmoother(new_factors, new_values, timestamps, delete_slots):
         return false
 ```
 
-### 5.6 诊断监控
+### 5.7 诊断监控
 
 | 指标 | 正常范围 | 告警阈值 |
 |------|---------|---------|
