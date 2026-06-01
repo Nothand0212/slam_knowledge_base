@@ -79,6 +79,16 @@ sources:
   FeatureDatabase      (前端写 → 路标管线读)
   KeyframeDatabase     (路标管线写 → 回环读)
   ExplicitLandmarkMap  (路标管线写 → 回环读)
+  BackendSnapshotBuffer (Backend 写 → Tracking 读, atomic shared_ptr, 只读快照)
+        │
+        │  Backend publishSnapshot() 写入:
+        │    optimized_navstate  (pose + velocity)
+        │    optimized_bias      (IMU bias)
+        │    active_landmarks    (3D 位置 + 不确定性)
+        │    active_keyframes    (窗口内 KF)
+        │    culled_landmarks    (已剔除路标 ID)
+        ▼
+  Tracking consumeBackendSnapshot() 读取 (每帧, 无锁, 异步)
 ```
 
 ### 1.2 全局状态机
@@ -371,6 +381,16 @@ void consumeBackendSnapshot(const BackendSnapshot& snap) {
      → 继续使用上一版本的 snapshot
    - 如果 snapshot_id 跳跃 >1 (Backend 连续完成多轮而 Tracking 未读取)
      → 只消费最新版本, 跳过中间的
+   - **如果 snapshot 过期**:
+     ```
+     if (t_cur - snap->publish_timestamp > max_snapshot_age_ms ||
+         cur_kf_id - snap->latest_kf_id > max_snapshot_kf_gap) {
+         disableLocalMapProjection();  // 不用过期路标做匹配
+         fallbackToImuAndKltOnly();    // 降级为纯 KLT 跟踪
+     }
+     ```
+     建议: `max_snapshot_age_ms = 500`, `max_snapshot_kf_gap = 3`
+   - Backend 卡住时，Tracking 不依赖过期活跃路标做 3D-2D 投影匹配
 
 4. Track/Landmark ID 稳定性:
    - LandmarkId 在 Backend 中不可变 (SmartFactor 晋升时分配, 终身不变)
@@ -950,7 +970,7 @@ function optimize(timestamp_kf_nsec, cur_id, max_extra_iterations, extra_delete_
         // 标记 suspect 路标: 重投影 > χ² 阈值 → 留给 post-update 二次裁决
         for each obs in explicit_obs_this_kf:
             err = computeStereoReprojError(refined_pose, obs)
-            if err.chi2 > 5.991: obs.suspect = true        // χ²_2, p=0.05
+            if err.chi2 > 7.815: obs.suspect = true  // χ²_3, p=0.05 (stereo residual: uL,uR,v)
     
     // ===== 阶段 2: iSAM2 增量平滑 =====
     // isam2.update() = 增量非线性优化 (增量平滑, 非批量 BA)
@@ -1230,7 +1250,8 @@ Factor-VIO 的 BA (隐式 iSAM2 增量):
 
 | ORB-SLAM3 | g2o 调用 | 优化变量 | Factor-VIO 等价物 | 缺失风险 |
 |-----------|---------|---------|------------------|---------|
-| Motion-only BA | `Optimizer::PoseOptimization` | 仅当前帧位姿, 固定 MapPoint | `isam2.update()` 加新因子——新位姿自然被单独优化 (旧 clique 未受影响) | 无 |
+| Motion-only BA | `Optimizer::PoseOptimization` | 仅当前帧位姿, 固定 MapPoint | **Tracking 级 PoseRefinement** (§2.2 PHASE 6b), 用 BackendSnapshot.active_landmarks 做 3D-2D 投影匹配 | 若未开启则缺失 ORB-SLAM3 式实时位姿精化 |
+| Pre-iSAM Pose Refinement | ORB-SLAM3 无直接等价 | 仅当前 KF 位姿, 固定显式路标 | **Backend 阶段 1.5** (§5.3), 入图前改善 X(cur_id) 初值, 保护 iSAM2 线性化点 | 不能替代 Tracking 级 PoseRefinement |
 | Local BA | `Optimizer::LocalBundleAdjustment` | 当前 KF + 共视 KF + 路标 | `isam2.update()` 加新 SmartFactor——共视 KF 所在的 clique 被重线性化 | 无 |
 | Local Inertial BA | `Optimizer::LocalInertialBA` | Local BA + 速度/偏置/重力 | `isam2.update()` 加新 IMU 因子 + SmartFactor——IMU 连接的变量所在 clique 被触发 | 无 |
 | **Essential Graph** | `Optimizer::OptimizeEssentialGraph` | 仅 KF 位姿 (不含路标) | `isam2.update()` 加 BetweenFactor——Bayes Tree 增量传播回环校正 | ⚠️ 回环后**不**显式优化路标 |
@@ -1524,7 +1545,8 @@ Factor-VIO: "先验证, 后信任"
 
 | ORB-SLAM3 | g2o 调用 | 优化变量 | Factor-VIO 等价物 |
 |-----------|---------|---------|------------------|
-| Motion-only BA | `Optimizer::PoseOptimization` | 仅当前帧位姿, 固定 MapPoint | `isam2.update()` 加新因子——新位姿自然被单独优化 (旧 clique 未受影响) |
+| Motion-only BA | `Optimizer::PoseOptimization` | 仅当前帧位姿, 固定 MapPoint | Tracking 级 PoseRefinement, 用 BackendSnapshot.active_landmarks |
+| Pre-iSAM Pose Refinement | ORB-SLAM3 无直接等价 | 仅当前 KF 位姿, 固定显式路标 | Backend 阶段 1.5, 保护 iSAM2 线性化点 |
 | Local BA | `Optimizer::LocalBundleAdjustment` | 当前 KF + 共视 KF + 路标 | `isam2.update()` 加新 SmartFactor——共视 KF 所在的 clique 被重线性化 |
 | Local Inertial BA | `Optimizer::LocalInertialBA` | Local BA + 速度/偏置/重力 | `isam2.update()` 加新 IMU 因子 + SmartFactor——IMU 连接的变量所在 clique 被触发 |
 | Full BA | `Optimizer::GlobalBundleAdjustment` | 所有 KF + 所有 MapPoint | 非增量: 从零构建因子图 + `LevenbergMarquardtOptimizer` |
@@ -2267,7 +2289,7 @@ struct BackendProbe {
     int pre_isam_executed = 0;           // 本轮执行次数 (有 ≥10 显式路标时 =1)
     int pre_isam_obs_used = 0;           // 使用的显式路标观测数
     int pre_isam_iterations = 0;         // GN 迭代次数 (固定 4)
-    int pre_isam_suspects_marked = 0;    // chi²>5.991 标记的 suspect 路标数
+    int pre_isam_suspects_marked = 0;    // chi²>7.815 标记的 suspect 路标数
 
     // ======== 因子图大小 ========
     int graph_factors = 0;           // smoother_->getFactors().size()
