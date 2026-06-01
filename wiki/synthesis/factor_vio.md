@@ -1638,6 +1638,40 @@ if (!checkFrontendHealth(fp) || !checkLandmarkHealth(lp) || !checkBackendHealth(
     dumpFullState();  // 全量快照
 ```
 
+### 10.8 GTSAM 诊断 API 速查
+
+iSAM2 启用诊断必须设置 `evaluateNonlinearError=true` + `enableDetailedResults=true`：
+
+```cpp
+ISAM2Params params;
+params.evaluateNonlinearError = true;   // 计算 errorBefore/errorAfter
+params.enableDetailedResults = true;    // 填充 variablesRelinearized 等
+ISAM2 isam(params);
+
+auto result = isam.update(new_factors, new_values);
+// result.errorBefore / errorAfter — 优化前后非线性误差
+// result.variablesRelinearized — 重线性化变量数 (>20 可能有问题)
+// result.variablesReeliminated — 重消元变量数 (回环时暴增正常)
+// result.factorsRecalculated — 重新计算的因子数
+// result.cliques — 贝叶斯树团数
+
+// 运行时诊断 (无 ISAM2Result 时也可用)
+auto grad = isam.gradientAtZero();        // 梯度范数, →0 表示收敛
+auto fixed = isam.getFixedVariables();     // 被边缘化锁定的变量
+auto cov = isam.marginalCovariance(key);   // 某变量的边际协方差
+auto factors = isam.getFactorsUnsafe();    // 当前线性化后的因子图
+```
+
+**VINS-Fusion 风格的失败检测** (参考 `estimator.cpp:L955`):
+```cpp
+bool failureDetection(Vector3d acc_bias, Vector3d gyr_bias) {
+    if (f_manager.last_track_num < 2)        return true;  // 特征不足
+    if (acc_bias.norm() > 2.5)               return true;  // 加计偏置发散
+    if (gyr_bias.norm() > 1.0)               return true;  // 陀螺偏置发散
+    if (T_b_cam.translation().norm() > 1.0)  return true;  // 外参异常
+    return false;
+}
+
 ---
 
 ## 十一、相关页面
