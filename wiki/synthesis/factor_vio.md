@@ -212,6 +212,19 @@ processFrame(stereo_image, imu_buffer, prev_state):
   PHASE 6: 压缩存活点
     tracks_alive = compactByStatus(tracks_active, status)
 
+  PHASE 6b: [可选] Tracking 级位姿精化 (对标 ORB-SLAM3 PoseOptimization)
+    // 对当前帧显式路标做 motion-only BA → refined pose + inlier count
+    // 不同于后端 §5.3 阶段 1.5 的 pre-iSAM refinement
+    // 用途: 提升关键帧决策质量 (inlier count) + 实时位姿输出精度
+    if config.tracking_pose_refinement and explicit_landmarks_visible >= 10:
+        graph_mo, values_mo = buildMotionOnlyGraph(imu_pose, explicit_obs)
+        refined = GaussNewtonOptimizer(graph_mo, values_mo, {maxIter=4}).optimize()
+        current_pose = refined.at<Pose3>(X(cur_id))
+        tracking_quality_inliers = countReprojInliers(refined, explicit_obs)
+    else:
+        current_pose = imu_predicted_pose
+        tracking_quality_inliers = r2d2d_inliers
+
   PHASE 7: 关键帧决策
     is_keyframe = shouldBeKeyframe(tracks_alive, prev_keyframe, pim)
     // 条件: disparity>0.5px+Δt>0.2s | Δt>5s | Δtranslation>0.5m | Δrotation>15° | features<20 | dropout>50%
@@ -767,11 +780,17 @@ function optimize(timestamp_kf_nsec, cur_id, max_extra_iterations, extra_delete_
     //   时间戳 < max_timestamp - smootherLag → 被边缘化
     //   即: cur_id - key_timestamp > lag_states → 老变量被边缘化
     
-    // ===== 阶段 1.5: Motion-only BA (精化当前帧位姿, 固定路标) =====
+    // ===== 阶段 1.5: 入图前位姿预优化 (Pre-iSAM Pose Refinement) =====
     // 目的: 在坏观测进入 iSAM2 之前拦截——iSAM2 的 FEJ 让错误不可逆
     // 范围: 仅对显式路标 (SmartFactor 试用期路标依赖内部的 3σ 拒绝)
     // 成本: ~2ms, 4 次 GN 迭代, 6-DOF 变量, 零新依赖 (复用 GenericStereoFactor)
-    // 对标: ORB-SLAM3 PoseOptimization (Tracking.cc motion-only BA)
+    //
+    // ⚠️ 与 ORB-SLAM3 PoseOptimization 的区别:
+    //   ORB-SLAM3: 每帧 Tracking 线程中执行, 用于实时位姿输出 + 外点剔除 + 关键帧决策
+    //   本设计: 仅关键帧入图前执行, 用于改善 iSAM2 线性化点 + FEJ 保护
+    //   两者目的不同——ORB-SLAM3 需要 per-frame real-time pose,
+    //   Factor-VIO 只需要 per-KF pre-iSAM protection.
+    //   如果需要 per-frame 实时位姿精化, 应在 Tracking 线程中增加独立的 PoseRefinement 步骤.
     if explicit_obs_this_kf.size() >= 10:
         graph_mo = NonlinearFactorGraph()
         values_mo = Values()
@@ -799,13 +818,15 @@ function optimize(timestamp_kf_nsec, cur_id, max_extra_iterations, extra_delete_
             err = computeStereoReprojError(refined_pose, obs)
             if err.chi2 > 5.991: obs.suspect = true        // χ²_2, p=0.05
     
-    // ===== 阶段 2: iSAM2 增量 BA 优化 =====
-    // ⚠️ isam2.update() 本身就是 Bundle Adjustment!
-    // 它在 Bayes Tree 中做增量非线性优化:
+    // ===== 阶段 2: iSAM2 增量平滑 =====
+    // isam2.update() = 增量非线性优化 (增量平滑, 非批量 BA)
     //   1. 将 new_factors 在当前线性化点线性化 → 高斯因子
     //   2. 对受影响的 clique 做消元 (elimination) → 更新 Bayes Tree
     //   3. 对受影响变量做回代 (back-substitution) → 更新估计值
     //   4. 检查是否需要重线性化 (relinearizeThreshold)
+    //
+    // 不等价于 ORB-SLAM3 的批量 Local BA——iSAM2 只重线性化受影响 clique,
+    // 不是每次对窗口内所有变量做完整 LM 迭代.
     //
     // 被优化的变量:
     //   - X(k): 窗口内所有 KF 位姿 (受 SmartFactor+IMU+Prior 约束)
@@ -2108,11 +2129,11 @@ struct BackendProbe {
     int exc_cheirality_recovers = 0; // Cheirality 异常中成功递归修复次数
     int exc_cheirality_fails = 0;    // 递归 5 次仍失败
 
-    // ======== Motion-only BA ========
-    int moba_executed = 0;           // 本轮执行次数 (有 ≥10 显式路标时 =1)
-    int moba_obs_used = 0;           // 使用的显式路标观测数
-    int moba_iterations = 0;         // GN 迭代次数 (固定 4)
-    int moba_suspects_marked = 0;    // chi²>5.991 标记的 suspect 路标数
+    // ======== Pre-iSAM Pose Refinement ========
+    int pre_isam_executed = 0;           // 本轮执行次数 (有 ≥10 显式路标时 =1)
+    int pre_isam_obs_used = 0;           // 使用的显式路标观测数
+    int pre_isam_iterations = 0;         // GN 迭代次数 (固定 4)
+    int pre_isam_suspects_marked = 0;    // chi²>5.991 标记的 suspect 路标数
 
     // ======== 因子图大小 ========
     int graph_factors = 0;           // smoother_->getFactors().size()
@@ -2135,7 +2156,7 @@ struct BackendProbe {
     double time_isam2_update_ms = 0; // smoother_->update()
     double time_slot_recovery_ms = 0;// updateNewSmartFactorsSlots
     double time_post_update_ms = 0;  // chi² 检查 + 状态更新
-    double time_moba_ms = 0;         // Motion-only BA
+    double time_pre_isam_ms = 0;         // Pre-iSAM Pose Refinement
     double time_total_ms = 0;
 };
 ```
@@ -2144,7 +2165,7 @@ struct BackendProbe {
 
 | 收集时机 | 填充的字段 |
 |---------|-----------|
-| optimize() 阶段 1.5 后 | `moba_*`, `time_moba_ms` |
+| optimize() 阶段 1.5 后 | `moba_*`, `time_pre_isam_ms` |
 | optimize() 阶段 0 后 | `n_sf_*`, `n_imu`, `n_explicit_*`, `n_between_*`, `n_prior_*`, `n_zupt`, `n_deleted_slots` |
 | optimize() 阶段 2 后 | `update_ok/fail`, `exc_*`, `graph_*`, `hessian_*`, `error_*` |
 | optimize() 结束后 | `time_*` |
