@@ -1332,21 +1332,37 @@ Factor-VIO: "先验证, 后信任"
 ### 5.5 iSAM2参数配置
 
 ```cpp
+// 参考 GTSAM VisualISAM2Example + ISAM2Example_SmartFactor + Kimera-VIO
 gtsam::ISAM2Params isam_param;
-isam_param.optimizationParams = gtsam::ISAM2GaussNewtonParams();  // GN,非Dogleg
+isam_param.optimizationParams = gtsam::ISAM2GaussNewtonParams();
 isam_param.optimizationParams.wildfireThreshold = 0.001;
 isam_param.cacheLinearizedFactors = true;        // 性能优化
-isam_param.relinearizeThreshold = 0.01;          // 激进重线性化
-isam_param.relinearizeSkip = 1;                  // 每步检查
+isam_param.relinearizeThreshold = 0.01;          // 激进重线性化 (GTSAM 示例一致)
+isam_param.relinearizeSkip = 1;                  // 每步检查 (示例一致)
 isam_param.findUnusedFactorSlots = true;         // 防止槽位泄漏
+isam_param.enableDetailedResults = true;         // ★ 启用 ISAM2Result.detail (GTSAM示例)
+isam_param.evaluateNonlinearError = true;        // ★ 启用 errorBefore/errorAfter
 isam_param.factorization = gtsam::ISAM2Params::CHOLESKY;
 
 auto smoother = IncrementalFixedLagSmoother(
-    nr_states = 25,              // 关键帧计数 (≈5s @ 5Hz KF率)
+    lag_seconds = 5.0,           // 约25-30关键帧
     isam_param);
-// 注: Kimera 用 KF ID 作时间戳, smootherLag 实际值是"关键帧数量",
-// 不是秒。当 KF ID 差值 > nr_states 时边缘化旧变量。
 ```
+
+**GTSAM 示例中的关键模式**：
+
+1. **增量更新后必须清空输入** (`VisualISAM2Example:L138-139`):
+```cpp
+isam.update(graph, initialEstimate);   // 只传 NEW 因子和初值
+graph.resize(0);                        // ← 每次更新后清空!
+initialEstimate.clear();                // ← 每次更新后清空!
+```
+
+2. **额外迭代** (`VisualISAM2Example:L131`): `isam.update()` 不带参数调用一次（额外重线性化），Factor-VIO 通过 `max_extra_iterations` 支持此模式。
+
+3. **首帧固定**: GTSAM 示例用 `NonlinearEquality<Pose3>(1, Pose3())` 而非 `PriorFactor` 来固定首帧（StereoVOExample:L41），彻底消除 gauge freedom。Factor-VIO 用极紧 `PriorFactor` (σ=1e-5) 达到近似效果。
+
+4. **SmartFactor 单例复用 vs clone-and-add**: GTSAM 示例中同一个 SmartFactor 对象跨多次 `isam.update()` 复用，直接 `smartFactor->add(meas, key)` 追加观测（ISAM2Example_SmartFactor:L83）。Kimera-VIO 和 Factor-VIO 用 clone-and-add 避免直接修改已线性化的因子——两者均可，clone-and-add 更安全。
 
 ### 5.6 updateSmoother异常恢复 (Kimera-VIO模式)
 
