@@ -247,8 +247,14 @@ processFrame(stereo_image, imu_buffer, prev_state):
         tracking_quality_inliers = r2d2d_inliers
 
   PHASE 7: 关键帧决策
-    is_keyframe = shouldBeKeyframe(tracks_alive, prev_keyframe, pim)
-    // 条件: disparity>0.5px+Δt>0.2s | Δt>5s | Δtranslation>0.5m | Δrotation>15° | features<20 | dropout>50%
+    is_keyframe = shouldBeKeyframe(
+        tracks_alive, prev_keyframe, pim,
+        current_pose,              // Tracking PoseRefinement 精化后的位姿
+        tracking_quality_inliers,  // 内点数 (用于评估跟踪质量)
+        local_map_match_count)     // Backend active landmarks 匹配数
+    // 条件: disparity>0.5px+Δt>0.2s | Δt>5s | Δtranslation>0.5m | Δrotation>15°
+    //        | features<20 | dropout>50%
+    //        | tracking_quality_inliers < 15 (新增, 对标 ORB-SLAM3)
 
   PHASE 7b: 补新特征 (仅关键帧)
     if is_keyframe:
@@ -346,9 +352,12 @@ void consumeBackendSnapshot(const BackendSnapshot& snap) {
     latest_optimized_pose_ = snap.optimized_navstate.pose();
     latest_optimized_vel_  = snap.optimized_navstate.velocity();
 
-    // 2. IMU bias: 覆写前端预积分器, 下一帧传播更准
+    // 2. IMU bias: 缓存后端最新 bias, 下一帧/本帧 Phase 1 创建 PIM 时使用
+    //    ⚠️ 不在此处 reset 当前 PIM——当前帧可能已开始积分
+    //    新的 PIM 对象在 Phase 1 创建时自动使用更新后的 frontend_imu_bias_
     frontend_imu_bias_ = snap.optimized_bias;
-    pim_->resetIntegrationAndSetBias(snap.optimized_bias);
+    // 如果存在跨帧 persistent PIM: 仅在帧边界(积分开始前)允许 reset,
+    // 禁止在积分中途 resetIntegrationAndSetBias()
 
     // 3. 活跃路标: 用于当前帧的 3D-2D 投影匹配 (对标 ORB-SLAM3 TrackLocalMap)
     active_landmarks_cache_ = snap.active_landmarks;
@@ -1277,7 +1286,7 @@ Factor-VIO 只有 **一个 iSAM2**，所有优化通过增量 `isam2.update()` �
 
 | 维度 | ORB-SLAM3 多层 BA | Factor-VIO 单 iSAM2 |
 |------|------------------|-------------------|
-| Motion-only BA | **显式**调用, 固定路标只优化位姿 | **隐式**——新 KF 进入 Bayes Tree 时，旧 clique 不受影响，新位姿被自然优化 |
+| Motion-only BA | **显式**调用, 固定路标只优化位姿 | **Tracking 级 PoseRefinement** (§2.2 PHASE 6b) 显式执行——不是 iSAM2.update() 的隐式等价物 |
 | Local BA | **显式**批量 LM 迭代窗口内所有变量 | **隐式**——`isam2.update()` 的重线性化等价于对受影响 clique 做 BA |
 | 回环后 Essential Graph | **显式**优化所有 KF 位姿 (不含路标) | **隐式**——BetweenFactor 注入后 Bayes Tree 增量传播校正 |
 | 回环后路标优化 | **显式** Full BA 重新优化所有 MapPoint | **缺失**——iSAM2 做 incremental update 但不会像 Full BA 那样从头重建所有路标位置 |
@@ -1309,7 +1318,7 @@ ORB-SLAM3 **不使用 SmartStereo**——它基于 g2o，所有路标都是显�
 |---------|------|---------|------|----------------|
 | `EdgeSE3ProjectXYZ` | `VertexSE3Expmap`(pose) + `VertexSBAPointXYZ`(point) | 2 (单目重投影) | Local BA / Full BA 的视觉约束 | `GenericStereoFactor<Pose3,Point3>` |
 | `EdgeStereoSE3ProjectXYZ` | `VertexSE3Expmap`(pose) + `VertexSBAPointXYZ`(point) | 3 (uL,uR,v) | 双目 Local BA 视觉约束 | `GenericStereoFactor<Pose3,Point3>` |
-| `EdgeSE3ProjectXYZOnlyPose` | `VertexSE3Expmap`(pose) 单边 | 2 | Motion-only BA (固定路标,只优化位姿) | iSAM2 增量自动等价——新因子不影响路标所在 clique |
+| `EdgeSE3ProjectXYZOnlyPose` | `VertexSE3Expmap`(pose) 单边 | 2 | Tracking Motion-only BA | Tracking PoseRefinement 中的 pose-only projection factor; Backend pre-iSAM refinement 可复用类似"固定路标,只优化 pose"的局部图,但不是 iSAM2 自动等价 |
 | `EdgeInertial` | `VertexSE3`(pose_i+j) + `VertexVelocity`(v_i+j) + `VertexGyroBias` + `VertexAccBias` | 9 (er,ev,ep) | **6顶点**(2pose+2vel+2bias) | `ImuFactor` + `BetweenFactor<ConstantBias>` |
 | `EdgeInertialGS` | 上面 4 种 + `VertexGDir` + `VertexScale` | 9 | IMU 初始化优化 (含重力方向+尺度) | 初始化阶段专用因子图 |
 | `EdgeSim3ProjectXYZ` | `VertexSim3` + `VertexSBAPointXYZ` | 2 | 回环 Sim3 约束 | `BetweenFactor<Pose3>` (回环) |
