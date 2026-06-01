@@ -238,6 +238,8 @@ processFrame(stereo_image, imu_buffer, prev_state):
   return FrontendFrame(timestamp, tracks_alive, pim, raw_imu, is_keyframe)
 ```
 
+**RANSAC 执行时机**：Kimera-VIO 中 RANSAC 仅发生在关键帧内部（`processStereoFrame` L342+ 块）。Factor-VIO 设计选择在每帧执行 2D-2D RANSAC，关键帧额外执行 3D-3D RANSAC。这是有意偏离 Kimera 的架构选择——目的是在非关键帧上也剔除明显的 2D 外点。
+
 ### 2.2 NCC立体匹配详细规格
 
 ```
@@ -266,39 +268,42 @@ function nccStereoMatch(left_img, right_img, left_pt, baseline, K):
 
 ### 2.3 前端参数表
 
-| 分类 | 参数 | 值 | 来源 |
-|------|------|-----|------|
-| **KLT** | 窗口大小 | 21×21 px | VINS-Fusion |
-| | 金字塔层数 | 3 (有IMU预测时1) | OpenVINS |
-| | 最大迭代 | 30 | 三者一致 |
-| | 收敛ε | 0.01 | 三者一致 |
-| | 双向光流阈值 | 0.5 px | VINS-Fusion |
-| **特征检测** | 检测器 | Shi-Tomasi (GFTT) | Kimera |
-| | qualityLevel | 0.001 | Kimera |
-| | 目标特征数 | 300/帧 | Kimera Euroc |
-| | 原始候选数 | 2000 (ANMS前) | Kimera |
-| | 空间分布 | Binning 7×5 | Kimera Euroc |
-| | 子像素精化 | (5,5)窗口, 20次迭代 | OpenVINS |
-| **特征管理** | 最大年龄 | 25关键帧 | Kimera |
-| | 仅在KF检测 | true | Kimera |
-| **立体匹配** | 模板尺寸 | 101×11 px | Kimera |
-| | NCC方法 | CV_TM_SQDIFF | Kimera |
-| | NCC阈值 | 0.15 | Kimera |
-| | 深度范围 | [0.3, 15.0] m | Kimera保守化 |
-| | 子像素精化 | 可选(Kimera默认关) | — |
-| **2D-2D RANSAC** | 算法 | 2-point(IMU)/5-point(Nistér) | Kimera |
-| | 阈值 | 1.0e-6 (bearing cos空间) | Kimera |
-| | 最少内点 | 10 | Kimera |
-| | 置信度 | 0.995 | Kimera |
-| **3D-3D RANSAC** | 算法 | 1-point voting(IMU)/3-point(Arun) | Kimera |
-| | 阈值 | 1.0 (马氏距离²) | Kimera |
-| | 最少内点 | 5 | Kimera |
-| | 外点处理 | **降级(FAILED_ARUN),不删除** | Kimera |
-| **关键帧** | 最小时间 | 0.2 s | Kimera |
-| | 最大时间 | 5.0 s | Kimera |
-| | 最小视差 | 0.5 px | Kimera |
-| | 最大平移 | 0.5 m | VINS-Fusion |
-| | 最大旋转 | 15° | VINS-Fusion |
+> ⚠️ 标注: 🔵 = 与 Kimera-Euroc 实际值不同（Factor-VIO 设计选择）, 🟢 = 与 Kimera 一致
+
+| 分类 | 参数 | 值 | 来源 | 备注 |
+|------|------|-----|------|------|
+| **KLT** | 窗口大小 | 🔵 21×21 px | VINS-Fusion | Kimera-Euroc 实际用 24×24 |
+| | 金字塔层数 | 🔵 3 (有IMU预测时1) | VINS-Fusion | Kimera-Euroc 实际用 4 层 |
+| | 最大迭代 | 🟢 30 | 三者一致 | |
+| | 收敛ε | 🔵 0.01 | VINS-Fusion/OpenVINS | Kimera-Euroc 实际用 **0.1** (10× 差) |
+| | 双向光流阈值 | 0.5 px | VINS-Fusion (Kimera 默认关) | |
+| **特征检测** | 检测器 | 🟢 Shi-Tomasi (GFTT) | Kimera | |
+| | qualityLevel | 🟢 0.001 | Kimera | VINS-Fusion 用 0.01 |
+| | 目标特征数 | 🟢 300/帧 | Kimera Euroc | |
+| | 原始候选数 | 🟢 2000 (ANMS前) | Kimera | |
+| | 空间分布 | 🟢 Binning 7×5 | Kimera Euroc | |
+| | 子像素精化 | 🔵 (5,5)窗口, 20次 | OpenVINS | Kimera 用 (10,10)窗口/40次 |
+| **特征管理** | 最大年龄 | 🟢 25关键帧 | Kimera | |
+| | 仅在KF检测 | 🟢 true | Kimera | |
+| **立体匹配** | 模板尺寸 | 🟢 101×11 px | Kimera | |
+| | 匹配方法 | 🟢 CV_TM_SQDIFF (非NCC!) | Kimera | 文档称"NCC"但实际是平方差 |
+| | 匹配阈值 | 🟢 0.15 (归一化[0,1]) | Kimera | |
+| | 深度范围 | 🔵 [0.3, 15.0] m | 设计选择 | Kimera Euroc 用 [0.5, 10.0]m |
+| | 子像素精化 | 可选(Kimera默认关) | Kimera | |
+| **2D-2D RANSAC** | 算法 | 🟢 2-point(IMU)/5-point(Nistér) | Kimera | |
+| | 阈值 | 🟢 1.0e-6 (bearing cos空间) | Kimera | |
+| | 最少内点 | 🟢 10 | Kimera | |
+| | 置信度 | 🟢 0.995 | Kimera | |
+| **3D-3D RANSAC** | 算法 | 🟢 1-point voting(IMU)/3-point(Arun) | Kimera | |
+| | 阈值 | 🟢 1.0 (马氏距离²) | Kimera | |
+| | 最少内点 | 🟢 5 | Kimera | |
+| | 外点处理 | 🟢 **降级(FAILED_ARUN),不删除** | Kimera | |
+| **关键帧** | 最小时间 | 🟢 0.2 s | Kimera | |
+| | 最大时间 | 🟢 5.0 s | Kimera | |
+| | 最小视差 | 🟢 0.5 px | Kimera | |
+| | 🔵 最大平移 | **0.5 m** | **Factor-VIO 新增** | 不存在于 Kimera/VINS/ORB-SLAM3 源码 |
+| | 🔵 最大旋转 | **15°** | **Factor-VIO 新增** | 不存在于 Kimera/VINS/ORB-SLAM3 源码 |
+| | 🔵 特征丢失率 | **50%** | **Factor-VIO 新增** | 不存在于 Kimera/VINS/ORB-SLAM3 源码 |
 
 ### 2.4 前端输出结构 (FrontendOutput → LandmarkPipeline)
 
@@ -645,7 +650,7 @@ void anchorInitialState(LocalStateEstimate init):
 | 参数 | Kimera-VIO | 本方案 | 依据 |
 |------|-----------|--------|------|
 | 位置σ | 1e-5 m | 1e-5 m | 首帧固定,防止整体漂移 |
-| roll/pitchσ | 1e-5 rad (YAML:0.1745) | 1e-5 rad | 静态时重力可观,极紧 |
+| roll/pitchσ | 🔵 0.1745 rad (=10°) | 🔵 0.1745 rad | Kimera源码默认值(`VioBackendParams.h:L111`: `10.0/180.0*M_PI`), 非1e-5 |
 | yawσ | 1.75e-3 rad | 1.75e-3 rad | yaw不可观,适度松 |
 | 速度σ | 1e-3 m/s | 1e-3 m/s | 静止初始化可信 |
 | acc biasσ | 0.1 m/s² | 0.1 m/s² | 中等先验 |
@@ -1255,8 +1260,10 @@ isam_param.findUnusedFactorSlots = true;         // 防止槽位泄漏
 isam_param.factorization = gtsam::ISAM2Params::CHOLESKY;
 
 auto smoother = IncrementalFixedLagSmoother(
-    lag_seconds = 5.0,           // 约25-30关键帧
+    nr_states = 25,              // 关键帧计数 (≈5s @ 5Hz KF率)
     isam_param);
+// 注: Kimera 用 KF ID 作时间戳, smootherLag 实际值是"关键帧数量",
+// 不是秒。当 KF ID 差值 > nr_states 时边缘化旧变量。
 ```
 
 ### 5.6 updateSmoother异常恢复 (Kimera-VIO模式)
