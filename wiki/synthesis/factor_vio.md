@@ -1074,6 +1074,124 @@ ORB-SLAM3 **不使用 SmartStereo**——它基于 g2o，所有路标都是显�
 | 新增路标的 BA 成本 | O(n³) 随路标数增长 (全局批量) | O(1) 增量 (仅受影响 clique) |
 | 路标总数上限 | 受限于批量 BA 计算时间 (通常 1000-3000) | 受限于 iSAM2 窗口大小 (固定, ~25-30 KFs 内的路标) |
 
+### 5.4b 两种路标哲学的深度对比: ORB-SLAM3 显式 vs Factor-VIO 隐式→显式
+
+#### 一、架构哲学
+
+```
+ORB-SLAM3: "先信任, 后验证"
+  路标创建 → 立即可用 (VertexSBAPointXYZ)
+  → 参与 BA 优化 3D 位置
+  → MapPointCulling 事后剔除不靠谱的
+  
+Factor-VIO: "先验证, 后信任"  
+  路标创建 → 试用期 (SmartFactor, 隐式)
+  → 不参与 BA，只约束位姿
+  → 10 条件晋升门控通过后 → 显式 Point3 → 参与 BA
+```
+
+#### 二、路标生命周期
+
+| 阶段 | ORB-SLAM3 | Factor-VIO |
+|------|----------|-----------|
+| 创建 | KF 间 ORB 匹配 + 三角化 → 立即 `new MapPoint` → `VertexSBAPointXYZ` | 立体匹配成功 → `DEPTH_FILTER` → 深度收敛 → `SMART_TRIAL` |
+| 初值 | 三角化结果直接作为 g2o 顶点初值 | 深度滤波器收敛值 → SmartFactor 隐式三角化 |
+| 早期优化 | BA 中参与迭代（位姿+路标联合优化） | SmartFactor 内部 Schur 补——路标不进入状态，只约束位姿 |
+| 中期稳定 | 连续观测 → `mnFound/mnVisible` 统计 | 4+ 帧观测 + 10 条件通过 → 晋升为显式 `Point3` |
+| 剔除 | `MapPointCulling()`: found_ratio<0.25 或 2KF 后观测≤3 | chi² 后验连续 3 帧 >7.815 → `CULLED` |
+| 长期 | 参与 Full BA → 全局一致性优化 | iSAM2 边缘化 → `MARGINALIZED` (作为先验保留) |
+
+#### 三、BA 中的行为差异
+
+**ORB-SLAM3 的 BA** (g2o 批处理):
+```
+每次 Local BA 调用:
+  optimizer.initializeOptimization()
+  for 每个局部 KF:
+      addVertex(VertexSE3Expmap)           ← 位姿顶点
+      addVertex(VertexVelocity)            ← 速度顶点 (Inertial BA)
+      addVertex(VertexGyroBias)            ← 偏置顶点 (Inertial BA)
+  for 每个局部 MapPoint:
+      addVertex(VertexSBAPointXYZ)         ← 路标顶点 (始终存在!)
+  for 每个观测:
+      addEdge(EdgeStereoSE3ProjectXYZ)     ← stereo 边
+      addEdge(EdgeSE3ProjectXYZ)           ← mono 边
+      addEdge(EdgeInertial)                ← IMU 边
+  optimizer.optimize(steps)                ← g2o LM 批量迭代
+  → 位姿 + 路标 + 速度 + 偏置 + 重力同时优化
+```
+
+**Factor-VIO 的 BA** (iSAM2 增量):
+```
+每个 KF 的 isam2.update():
+  ① 新因子线性化 → 高斯因子
+  ② 对受影响 clique 消元 → Bayes Tree 更新
+  ③ 回代 → 变量更新
+  
+  参与优化的变量:
+    试用期路标: 不在状态中 (Schur 补消去)
+    晋升后路标: L(id) = Point3 ← 在状态中, 参与 clique 消元+回代
+  
+  → 增量平滑: 不是每次对所有变量 LM 迭代
+  → 但受影响 clique 中的旧变量 (含显式路标) 会被重线性化+重优化
+```
+
+#### 四、计算成本
+
+| | ORB-SLAM3 (g2o 批处理) | Factor-VIO (iSAM2 增量) |
+|---|---|---|
+| 每次 Local BA 时间 | O(n³), n = KF+路标数 (通常 50-200 变量) | O(1) 增量 (约 5-40ms, 取决于受影响 clique 大小) |
+| 路标数对 BA 的影响 | **线性增长** — 每个路标增加 3 维状态 + 多条边 | 试用期: 无影响 (Schur 补消去); 晋升后: 增加 clique 大小 |
+| Full BA 时间 | O(n³), n 可达数千 | 无增量等价物; 需从零构建因子图 + 批量优化 |
+| 内存 | 所有 KF + 所有 MapPoint 保留在内存中 | iSAM2 窗口内变量 (~25-30 KFs + 显式路标) + 边缘化先验 |
+
+#### 五、鲁棒性
+
+| 场景 | ORB-SLAM3 | Factor-VIO |
+|------|----------|-----------|
+| 三角化初值差 | **BA 可修正**——路标是变量, 多帧观测在批量迭代中拉回正确位置 | **试用期危险**——SmartFactor 隐式三角化依赖位姿精度, 位姿偏则三角化偏, 无迭代修正 |
+| 路标误匹配 (outlier) | **事前剔除弱**——三角化直接进 BA; **事后剔除强**——MapPointCulling + BA 中 Huber 核 | **事前过滤强**——双轮 RANSAC + 深度滤波 + 10 条件门控; 晋升后 chi² 监测 |
+| 路标被动态物体污染 | 进入 BA → 可能污染位姿估计 → 后续 MapPointCulling 剔除 | 难以通过双轮 RANSAC + 深度滤波 → 难以进入 SmartFactor 试用期 |
+| 弱纹理场景 (MH) | ORB 特征不足 → 三角化困难 → 路标数量少 → BA 约束弱 | KLT 在弱纹理下跟踪困难 → SmartFactor 退化率高 → 晋升率低 |
+| 快速旋转 | ORB 匹配困难 → 路标创建少 | IMU 预测 KLT → 跟踪成功率高于 ORB 匹配 |
+
+#### 六、优劣势总结
+
+**ORB-SLAM3 显式路标的优势**:
+1. **BA 可修正初值错误**——路标 3D 位置在批量 LM 迭代中不断精化
+2. **全局一致性更好**——Full BA 同时优化所有变量, 误差分布更均匀
+3. **实现更简单**——路标始终是显式顶点, 没有"试用期→晋升"的转换逻辑
+4. **回环后路标自动更新**——Full BA 重新优化所有路标位置
+
+**ORB-SLAM3 显式路标的劣势**:
+1. **坏路标污染 BA**——错误三角化的路标会拉偏位姿, 依赖 Huber 核 + MapPointCulling 事后补救
+2. **计算随路标数增长**——不能无限增加路标, 需 KeyFrameCulling 控制规模
+3. **路标初始三角化无质量门控**——ORB 匹配 + 视差检查是仅有的过滤
+4. **内存占用大**——所有 KF 和 MapPoint 长期驻留
+
+**Factor-VIO 隐式→显式的优势**:
+1. **试用期保护**——坏路标在 SmartFactor 阶段自然退化, 不污染 BA 状态
+2. **O(1) 增量**——计算量与路标总数无关 (仅受影响 clique)
+3. **多级质量门控**——双轮 RANSAC + 深度滤波 + 10 条件晋升 + chi² 后验
+4. **降级不删除**——3D-3D RANSAC 外点保留 2D bearing 约束
+
+**Factor-VIO 隐式→显式的劣势**:
+1. **试用期无法迭代修正**——如果初值差且通过了门控, 晋升后的初值仍然差
+2. **晋升时机敏感**——晋升太早 (信息不足) 或太晚 (被边缘化前) 都会降低效果
+3. **复杂度高**——需要维护两套路标管理代码 (SmartFactor 槽位 + 显式路标 Key)
+4. **回环后需手动提升**——受影响 SmartFactor 要重新三角化并晋升
+
+#### 七、适用场景推荐
+
+| 场景 | 推荐 |
+|------|------|
+| 纹理丰富 (V1_01, V2_02) | 两者均可; Factor-VIO 的计算效率更优 |
+| 弱纹理 (MH_01-MH_05) | ORB-SLAM3 的显式路标更可靠 (KLT 在弱纹理下退化严重) |
+| 动态环境 | Factor-VIO 的多级过滤更有优势 |
+| 长距离/大场景 | ORB-SLAM3 (Full BA + Atlas 多地图) vs Factor-VIO (仅窗口内, 需回环) |
+| 嵌入端/低算力 | Factor-VIO (O(1) 增量) |
+| 需要稠密路标 | ORB-SLAM3 (显式路标可直接用于重定位) |
+
 | ORB-SLAM3 | g2o 调用 | 优化变量 | Factor-VIO 等价物 |
 |-----------|---------|---------|------------------|
 | Motion-only BA | `Optimizer::PoseOptimization` | 仅当前帧位姿, 固定 MapPoint | `isam2.update()` 加新因子——新位姿自然被单独优化 (旧 clique 未受影响) |
